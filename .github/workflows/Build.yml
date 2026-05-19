@@ -37,18 +37,20 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: SetupGradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.3"
+
       - name: SetupNdk
         run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.1.8937393"
 
       - name: DownloadMinimp3
         run: curl -fsSL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o AndroidClient/app/src/main/cpp/minimp3.h
 
-      - name: SetPermissions
-        run: chmod +x AndroidClient/gradlew
-
       - name: Build
         working-directory: AndroidClient
-        run: ./gradlew assembleRelease
+        run: gradle assembleRelease
 
       - name: Upload
         uses: actions/upload-artifact@v4
