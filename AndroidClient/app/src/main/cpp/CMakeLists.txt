@@ -12,7 +12,7 @@ target_compile_options(audiosync PRIVATE
     -fno-plt
     -fno-semantic-interposition
     -fno-common
-    -ffp-contract=on
+    -ffp-contract=off
     -fno-stack-protector
     -fno-stack-clash-protection
     -mharden-sls=none
