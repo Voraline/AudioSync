@@ -1,10 +1,9 @@
 cmake_minimum_required(VERSION 3.22.1)
 project("audiosync" C)
 add_library(audiosync SHARED native-lib.c)
-
 target_compile_options(audiosync PRIVATE
     -std=c11
-    -Ofast
+    -O3
     -march=armv8.2-a+simd+fp16+dotprod+crypto+rcpc+lse
     -mtune=cortex-a76
     -flto=full
@@ -13,10 +12,7 @@ target_compile_options(audiosync PRIVATE
     -fno-plt
     -fno-semantic-interposition
     -fno-common
-    -ffast-math
-    -ffp-contract=fast
-    -fstrict-aliasing
-    -fmerge-all-constants
+    -ffp-contract=on
     -fno-stack-protector
     -fno-stack-clash-protection
     -mharden-sls=none
@@ -28,9 +24,7 @@ target_compile_options(audiosync PRIVATE
     -fvisibility=hidden
     -DNDEBUG
 )
-
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-
 target_link_options(audiosync PRIVATE
     -flto=full
     -Wl,--gc-sections
@@ -41,5 +35,4 @@ target_link_options(audiosync PRIVATE
     -Wl,--strip-all
     -Wl,--build-id=none
 )
-
 target_link_libraries(audiosync log aaudio)
