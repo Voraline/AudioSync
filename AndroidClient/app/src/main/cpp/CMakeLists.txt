@@ -6,117 +6,81 @@ target_compile_options(audiosync PRIVATE
     -std=c11
 
     # ── Optimisation level ────────────────────────────────────────────────────
-    # IMPORTANT: must be -O3, NOT -Ofast.
-    # -Ofast implies -ffast-math which permits the compiler to reassociate
-    # floating-point additions. The sigma-filter loops in DoClockSync and
-    # DoRollingProbe accumulate clock offsets into Sum/Var; reordering those
-    # additions changes Mean and Sigma, which changes which samples survive the
-    # 0.8-sigma rejection gate, which changes FinalOffset / ClockOffsetUs.
-    # That is a direct path to clients drifting out of sync.
+    # -O3 instead of -Ofast: -Ofast implies -ffast-math which enables
+    # -fassociative-math, allowing the compiler to reorder the near-cancellation
+    # subtraction in AudioCallback (two large timestamps ~10^11 µs differing by
+    # only ~10^5 µs). Reordering that loses all precision in ExactF, shifting
+    # playback by potentially hundreds of milliseconds. -O3 keeps every other
+    # scalar and vectorisation optimisation without touching FP semantics.
     -O3
 
     # ── Instruction-set / micro-arch ─────────────────────────────────────────
-    # armv8.2-a is the baseline for all Android 9+ mid/high-end SoCs (minSdk 28).
-    # +simd enables NEON 128-bit vector lanes used by the Catmull-Rom audio loop.
-    # +dotprod enables SDOT/UDOT for any future integer-accumulate paths.
-    # +crypto enables AES/SHA hardware (unused now but zero cost to enable).
-    # fp16 removed: enabling it lets the compiler use half-precision intermediates
-    # in autovectorised paths, which can corrupt the float timing calculations.
-    -march=armv8.2-a+simd+dotprod+crypto
-    -mtune=cortex-x1    # Tune instruction scheduling for Cortex-X1 class cores
-                        # (Snapdragon 888 / Exynos 2100 era and newer).
-                        # Upgraded from cortex-a76 (Snapdragon 855/865) — A76 is two
-                        # generations behind current flagships. -mtune only controls
-                        # pipeline scheduling, not ISA or FP semantics; safe to change.
+    # armv8.2-a is the baseline for all Android 9+ (minSdk 28) mid/high-end SoCs.
+    # +simd enables NEON; +dotprod enables SDOT/UDOT; +fp16 enables FP16 NEON.
+    # NOTE: +fp16 is kept for _Float16 data-type support (minimp3 SIMD paths)
+    # but WITHOUT -ffast-math the compiler will NOT auto-demote float32 operands
+    # to fp16, so AudioCallback's Catmull-Rom interpolation stays in float32.
+    -march=armv8.2-a+simd+fp16+dotprod+crypto
+    -mtune=cortex-a76                   # Tune scheduling for Cortex-A76 class cores
 
     # ── Link-time optimisation ───────────────────────────────────────────────
-    # Thin LTO performs cross-translation-unit inlining using cached per-file
-    # summaries rather than re-reading all bitcode; much faster than full LTO
-    # while capturing most of the cross-TU optimisation benefit.
-    -flto=thin
+    -flto=thin                          # Thin LTO: fast cross-TU inlining via cached summaries
 
     # ── Loop & code-gen transforms ───────────────────────────────────────────
-    -funroll-loops          # Unroll inner loops to reduce branch overhead in the
-                            # Catmull-Rom interpolation and sigma accumulation loops
-    -fomit-frame-pointer    # Frees the frame-pointer register in hot-path functions;
-                            # safe because unwind tables are dropped below
-    -fno-plt                # Avoid PLT trampolines on shared-library calls — direct
-                            # GOT dispatch is faster and removes one branch per call
-    -fno-semantic-interposition # Allow the linker to inline calls within the .so
-                                # without going through the PLT (Clang 7+)
-    -fno-common             # No tentative (common) definitions; lets the linker
-                            # eliminate truly unreferenced variables via --gc-sections
+    -funroll-loops                      # Unroll inner loops to reduce branch overhead
+    -fomit-frame-pointer                # Frees fp register in hot paths (frame-pointer not needed)
+    -fno-plt                            # Avoid PLT trampolines on shared-lib calls
+    -fno-semantic-interposition         # Allow intra-.so inlining (Clang ≥ 7)
+    -fno-common                         # No tentative definitions; enables better DCE
 
     # ── Floating-point ───────────────────────────────────────────────────────
-    # -ffp-contract=off: disables fused multiply-add contraction.
-    # A contraction like (a*b)+c → fma(a,b,c) changes the rounding of the
-    # intermediate result. In ExactF = (CurrentServerTimeUs - TargetFirePcUs)
-    # * PcmSampleRate / 1000000.0 a contracted form shifts the exact fractional
-    # sample index, directly moving when audio fires relative to the server clock.
-    -ffp-contract=off
-
-    # -fexcess-precision=standard: forbids the compiler from holding any float or
-    # double in a wider register than its declared type between operations.
-    # Without this Clang may keep intermediates at full register width across
-    # loop iterations, producing values that differ from strict IEEE 754 arithmetic.
-    -fexcess-precision=standard
-
-    # -fno-unsafe-math-optimizations: blocks reassociation, reciprocal substitution,
-    # and similar transforms that are algebraically valid but change results in
-    # finite-precision arithmetic. With -O3 + -flto=thin the compiler would
-    # otherwise freely apply these across inlined functions at link time, which
-    # would affect the Mean/Sigma computation in DoClockSync and DoRollingProbe.
-    -fno-unsafe-math-optimizations
-
-    # -fno-math-errno: removes the errno-write side-effect after math calls such as
-    # sqrt() and log(). The computed floating-point RESULT is identical — only the
-    # write to the errno variable is elided. This is safe here because:
-    #   (a) errno is never tested after math calls in this codebase, and
-    #   (b) it is orthogonal to FP ordering: it does not permit reassociation,
-    #       reciprocal substitution, or any of the transforms blocked above.
-    # Benefit: removes one conditional store per math intrinsic call site.
-    # NOTE: -fno-trapping-math (another sub-flag of -funsafe-math-optimizations)
-    # is intentionally NOT added here — it is already disabled by
-    # -fno-unsafe-math-optimizations above, and re-enabling it separately would
-    # contradict that flag with no meaningful gain (AArch64 hardware FP traps
-    # are disabled at the OS level anyway).
+    # -ffast-math is REMOVED. It was the primary sync-breaker via three sub-flags:
+    #   -fassociative-math  : allowed reordering (CurrentServerTimeUs - TargetFirePcUs),
+    #                         causing catastrophic cancellation — both values are ~10^11 µs
+    #                         but differ by only ~10^5 µs, so reordering loses all precision
+    #                         in ExactF and can shift playback start by 100s of milliseconds.
+    #   -ffp-contract=fast  : fused multiply-add across statement boundaries, changing
+    #                         ExactF rounding non-deterministically between compiler runs.
+    #   -freciprocal-math   : replaced /1000000.0 with *approx(1e-6), introducing a
+    #                         systematic bias in the computed sample index.
+    #   +fp16 + -ffast-math : allowed Clang to auto-vectorize Catmull-Rom interpolation
+    #                         using FP16 NEON lanes, quantizing sub-sample position to
+    #                         ~22 µs steps (FP16 has 10-bit mantissa vs float32's 23-bit).
+    #
+    # -fno-math-errno: safe to keep — only removes errno side-effects from libm
+    #   calls (sqrtf, sqrt), has zero effect on FP precision or operation ordering.
     -fno-math-errno
+    # -ffp-contract=on: allows FMA only within a single expression (IEEE 754-2008 §5.4.1
+    #   compliant). The Catmull-Rom Horner evaluation gets fused for better precision;
+    #   the timestamp arithmetic above the ExactF line is never touched.
+    -ffp-contract=on
+    -fstrict-aliasing                   # Assume no pointer aliasing for vectorisation
 
     # ── Safety-overhead removal ──────────────────────────────────────────────
-    -fno-stack-protector            # Remove per-frame stack-canary checks
-    -fno-unwind-tables              # Drop .ARM.exidx unwind entries
-    -fno-asynchronous-unwind-tables # Drop DWARF CFI async-unwind tables
-    -fno-exceptions                 # No C++ exception machinery (belt-and-braces for C)
+    -fno-stack-protector                # Remove per-frame stack-canary checks
+    -fno-unwind-tables                  # Drop .ARM.exidx unwind entries
+    -fno-asynchronous-unwind-tables     # Drop DWARF CFI async-unwind tables
+    -fno-exceptions                     # No C++ exception machinery (already C; belt-and-braces)
 
-    # ── Dead-code / icache footprint ─────────────────────────────────────────
-    -ffunction-sections # One ELF section per function — lets --gc-sections at link
-                        # time discard every function not reachable from an entry point
-    -fdata-sections     # Same for variables
-    -fvisibility=hidden # Hide all symbols by default; improves LTO inlining decisions
-                        # and allows --strip-all to remove the full symbol table
-    -fmerge-all-constants # Deduplicate identical read-only constants across translation
-                          # units (e.g. the 1000000.0 divisor in ExactF that appears in
-                          # multiple files). Merged copies share one cache line instead
-                          # of N. No FP effect: only changes where a constant lives in
-                          # memory, not its value or the order of operations that use it.
+    # ── Dead-code / icache size ──────────────────────────────────────────────
+    -ffunction-sections                 # One ELF section per function (enables --gc-sections)
+    -fdata-sections                     # One ELF section per variable
+    -fvisibility=hidden                 # Hide all symbols by default; improves LTO & strip
 
     # ── Misc ─────────────────────────────────────────────────────────────────
-    -DNDEBUG            # Disable assert() in minimp3 and other debug guards
+    -DNDEBUG                            # Disable assert() in minimp3 and other libs
 )
 
-# Tell CMake to apply IPO/LTO to any subdirectory targets as well.
+# Activate CMake-level IPO (adds -flto to all targets in case of subdirectories)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 target_link_options(audiosync PRIVATE
-    -flto=thin          # Thin LTO at link stage — must match the compile-stage flag
-    -Wl,--gc-sections   # Discard ELF sections with no live references (pairs with
-                        # -ffunction-sections / -fdata-sections above)
-    -Wl,-O3             # Run lld's own optimisation passes at link time
-    -Wl,--as-needed     # Drop any library that contributes no referenced symbols
-    -Wl,--icf=all       # Identical-code folding: merge duplicate function bodies
-                        # into a single copy to shrink the icache footprint
-    -Wl,-z,norelro      # Skip RELRO segment remapping on startup — removes the
-                        # mprotect() call that would otherwise add latency at launch
+    -flto=thin                  # Thin LTO at link stage (matches compile stage)
+    -Wl,--gc-sections           # Remove dead sections (pairs with -ffunction/data-sections)
+    -Wl,-O3                     # Linker-level optimisation passes (lld)
+    -Wl,--as-needed             # Drop libraries with no referenced symbols
+    -Wl,--icf=all               # Identical-code folding: merge duplicate functions
+    -Wl,-z,norelro              # Skip RELRO remapping (removes startup latency)
 )
 
 target_link_libraries(audiosync log aaudio)
