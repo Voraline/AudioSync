@@ -23,8 +23,11 @@ target_compile_options(audiosync PRIVATE
     # fp16 removed: enabling it lets the compiler use half-precision intermediates
     # in autovectorised paths, which can corrupt the float timing calculations.
     -march=armv8.2-a+simd+dotprod+crypto
-    -mtune=cortex-a76   # Tune instruction scheduling for Cortex-A76 class cores
-                        # (Snapdragon 855/865, Exynos 990, etc.)
+    -mtune=cortex-x1    # Tune instruction scheduling for Cortex-X1 class cores
+                        # (Snapdragon 888 / Exynos 2100 era and newer).
+                        # Upgraded from cortex-a76 (Snapdragon 855/865) — A76 is two
+                        # generations behind current flagships. -mtune only controls
+                        # pipeline scheduling, not ISA or FP semantics; safe to change.
 
     # ── Link-time optimisation ───────────────────────────────────────────────
     # Thin LTO performs cross-translation-unit inlining using cached per-file
@@ -65,6 +68,20 @@ target_compile_options(audiosync PRIVATE
     # would affect the Mean/Sigma computation in DoClockSync and DoRollingProbe.
     -fno-unsafe-math-optimizations
 
+    # -fno-math-errno: removes the errno-write side-effect after math calls such as
+    # sqrt() and log(). The computed floating-point RESULT is identical — only the
+    # write to the errno variable is elided. This is safe here because:
+    #   (a) errno is never tested after math calls in this codebase, and
+    #   (b) it is orthogonal to FP ordering: it does not permit reassociation,
+    #       reciprocal substitution, or any of the transforms blocked above.
+    # Benefit: removes one conditional store per math intrinsic call site.
+    # NOTE: -fno-trapping-math (another sub-flag of -funsafe-math-optimizations)
+    # is intentionally NOT added here — it is already disabled by
+    # -fno-unsafe-math-optimizations above, and re-enabling it separately would
+    # contradict that flag with no meaningful gain (AArch64 hardware FP traps
+    # are disabled at the OS level anyway).
+    -fno-math-errno
+
     # ── Safety-overhead removal ──────────────────────────────────────────────
     -fno-stack-protector            # Remove per-frame stack-canary checks
     -fno-unwind-tables              # Drop .ARM.exidx unwind entries
@@ -77,6 +94,11 @@ target_compile_options(audiosync PRIVATE
     -fdata-sections     # Same for variables
     -fvisibility=hidden # Hide all symbols by default; improves LTO inlining decisions
                         # and allows --strip-all to remove the full symbol table
+    -fmerge-all-constants # Deduplicate identical read-only constants across translation
+                          # units (e.g. the 1000000.0 divisor in ExactF that appears in
+                          # multiple files). Merged copies share one cache line instead
+                          # of N. No FP effect: only changes where a constant lives in
+                          # memory, not its value or the order of operations that use it.
 
     # ── Misc ─────────────────────────────────────────────────────────────────
     -DNDEBUG            # Disable assert() in minimp3 and other debug guards

@@ -23,6 +23,10 @@ if(MSVC)
         /Oy         # Omit frame-pointer — frees one register in every hot-path function
         /Gy         # Emit each function as a separate COMDAT section so /OPT:REF
                     # can strip unreferenced functions at link time
+        /Gw         # Emit each global variable in its own COMDAT section so /OPT:REF
+                    # can strip unreferenced globals at link time — the data-side
+                    # equivalent of /Gy. No floating-point effect: purely a linker
+                    # visibility change to static storage, not arithmetic.
         /GL         # Whole-program optimisation: defers final code-gen to the linker
                     # so it can inline and optimise across translation-unit boundaries
                     # (prerequisite for /LTCG)
@@ -50,6 +54,10 @@ if(MSVC)
 
         # ── Misc ─────────────────────────────────────────────────────────────
         /favor:AMD64    # Tune instruction scheduling for 64-bit AMD/Intel pipelines
+        /GA             # Optimise thread-local storage access for Windows executables;
+                        # emits a direct FS:/GS: segment reference instead of a helper
+                        # call. No floating-point effect: affects only TLS pointer load,
+                        # not arithmetic.
         /DNDEBUG        # Disable assert() in minimp3 and any other debug guards
     )
 
