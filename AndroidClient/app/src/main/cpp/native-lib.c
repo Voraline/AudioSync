@@ -53,9 +53,13 @@ static char               SrvIp[64];
 static struct sockaddr_in SrvAddr;
 
 /* ── Rolling-probe ring buffer ───────────────────────────────────────────────
- * Stores the last 32 probe results so DoRollingProbe can filter by RTT
- * instead of applying each raw sample directly to ClockOffsetUs.          */
-#define ProbeRingSize 64
+ * Stores the last 128 probe results so DoRollingProbe can filter by RTT
+ * instead of applying each raw sample directly to ClockOffsetUs.
+ * 128 entries at 30 ms/probe = ~3.84 s of history.  Bottom 8% = ~10 samples,
+ * giving the sigma filter enough pool to reliably reject a single bad packet
+ * (was 64 entries / bottom 10% = ~6 samples — one bad packet was 17% of
+ * the pool and could skew the EMA step noticeably).                        */
+#define ProbeRingSize 128
 static SyncSample ProbeRing[ProbeRingSize];
 static int        ProbeRingHead = 0;   /* next write position              */
 static int        ProbeRingFull = 0;   /* 1 once the buffer has wrapped    */
@@ -247,9 +251,11 @@ static void DoRollingProbe(int SSock) {
 
     int Count = ProbeRingFull ? ProbeRingSize : ProbeRingHead;
 
-    if (Count < 4) {
+    if (Count < 10) {
         /* Ring not full enough to filter yet — apply a small direct step so
-         * we still track the clock in the first few seconds after connect. */
+         * we still track the clock in the first few seconds after connect.
+         * Threshold raised from 4 to 10 to match the new BestN minimum,
+         * ensuring sigma filter always has at least 2 samples to work with. */
         int64_t CurOff = atomic_load_explicit(&ClockOffsetUs, memory_order_relaxed);
         int64_t Diff   = ProbeRing[(ProbeRingHead + ProbeRingSize - 1) % ProbeRingSize].Offset - CurOff;
         if (Diff >  500) Diff =  500;
@@ -258,20 +264,24 @@ static void DoRollingProbe(int SSock) {
         return;
     }
 
-    /* Copy and sort the ring buffer by RTT, take bottom 10%.
-     * With ring size 64 that is ~6 samples — the very lowest-RTT probes.
+    /* Copy and sort the ring buffer by RTT, take bottom 8%.
+     * With ring size 128 that is ~10 samples — the very lowest-RTT probes.
+     * Previously 10% of 64 = ~6 samples; one bad packet was 17% of the pool
+     * and could skew the sigma filter.  At ~10 samples a single bad packet
+     * is only 10% of the pool, so the 0.8σ rejection step reliably removes it.
      * Same principle as DoClockSync: lowest RTT = most symmetric delay
-     * = most accurate offset estimate.                                    */
+     * = most accurate offset estimate.                                      */
     SyncSample Tmp[ProbeRingSize];
     memcpy(Tmp, ProbeRing, (size_t)Count * sizeof(SyncSample));
     qsort(Tmp, (size_t)Count, sizeof(SyncSample), CmpRtt);
 
-    int BestN = Count * 10 / 100;   /* bottom 10% of 64 = ~6 samples */
+    int BestN = Count * 8 / 100;    /* bottom 8% of 128 = ~10 samples */
     if (BestN < 2) BestN = 2;
 
     /* Sigma filter on the offset values of those best-N samples.
-     * A low-RTT packet can still carry a noisy offset (e.g., server jitter);
-     * rejecting offsets beyond 1.0σ of the best-N set removes those.      */
+     * Tightened from 1.0σ to 0.8σ to match DoClockSync — with ~10 samples
+     * the spread is small enough that anything beyond 0.8σ is a bad packet,
+     * not natural variance.                                                 */
     double OffSum = 0.0;
     for (int I = 0; I < BestN; I++) OffSum += (double)Tmp[I].Offset;
     double OffMean = OffSum / (double)BestN;
@@ -285,7 +295,7 @@ static void DoRollingProbe(int SSock) {
     for (int I = 0; I < BestN; I++) {
         double D = (double)Tmp[I].Offset - OffMean;
         if (D < 0.0) D = -D;
-        if (OffSigma < 1.0 || D <= 1.0 * OffSigma) { FSum += (double)Tmp[I].Offset; FC++; }
+        if (OffSigma < 1.0 || D <= 0.8 * OffSigma) { FSum += (double)Tmp[I].Offset; FC++; }
     }
     if (FC == 0) { FSum = OffMean; FC = 1; }
     int64_t TargetOffset = (int64_t)(FSum / (double)FC);
