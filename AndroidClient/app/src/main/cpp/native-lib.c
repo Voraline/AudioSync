@@ -138,7 +138,8 @@ static void DoClockSync(void) {
 
     int SyncSock = socket(AF_INET, SOCK_DGRAM, 0);
     if (SyncSock < 0) return;
-    int Tos = 0x10, Prio = 6;
+    // int Tos = 0x10, Prio = 6;
+    int Tos = 0xB8, Prio = 6;
     setsockopt(SyncSock, IPPROTO_IP, IP_TOS,      &Tos,  sizeof(Tos));
     setsockopt(SyncSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 200000};
