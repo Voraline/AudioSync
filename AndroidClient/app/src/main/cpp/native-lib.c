@@ -467,8 +467,8 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AudioStream = St;
     AAudioStream_setBufferSizeInFrames(St, Burst);
     AAudioStream_requestStart(St);
-    struct timespec StabilizeTs = {0, 30000000};
-    nanosleep(&StabilizeTs, NULL);
+    // struct timespec StabilizeTs = {0, 30000000};
+    // nanosleep(&StabilizeTs, NULL);
     struct sched_param Sp;
     Sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &Sp);
