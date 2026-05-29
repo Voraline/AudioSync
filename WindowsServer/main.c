@@ -48,6 +48,11 @@ static DWORD WINAPI ListenerThread(void* Unused) {
     while (1) {
         int N = recvfrom(Sock, (char*)Buf, sizeof(Buf), 0, (struct sockaddr*)&From, &Fl);
         if (N < 1) continue;
+        char SenderIp[32];
+        inet_ntop(AF_INET, &From.sin_addr, SenderIp, 32);
+        uint16_t SenderPort = ntohs(From.sin_port);
+        uint64_t RxTime = NowUs();
+
         if (Buf[0] == PtRegister) {
             struct sockaddr_in Ca = From;
             Ca.sin_port = htons(ClientPort);
@@ -59,8 +64,15 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             if (!Found && ClientCount < MaxClients) {
                 Clients[ClientCount].Addr = Ca;
                 inet_ntop(AF_INET, &Ca.sin_addr, Clients[ClientCount].Ip, 32);
-                printf("  + Device: %s  (total: %d)\n", Clients[ClientCount].Ip, ClientCount + 1);
+                printf("[%llu us] REGISTER  from %s:%u -> assigned listen port %d  (total clients: %d)\n",
+                    (unsigned long long)RxTime, SenderIp, SenderPort, ClientPort, ClientCount + 1);
                 ClientCount++;
+            } else if (Found) {
+                printf("[%llu us] REGISTER  from %s:%u -> already known, ignored\n",
+                    (unsigned long long)RxTime, SenderIp, SenderPort);
+            } else {
+                printf("[%llu us] REGISTER  from %s:%u -> REJECTED (client table full, max %d)\n",
+                    (unsigned long long)RxTime, SenderIp, SenderPort, MaxClients);
             }
             LeaveCriticalSection(&ClientLock);
         } else if (Buf[0] == PtSyncReq && N >= (int)sizeof(SyncReqPkt)) {
@@ -71,6 +83,15 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             Ack.T2   = NowUs();
             Ack.T3   = NowUs();
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
+            printf("[%llu us] SYNC_REQ  from %s:%u  T1=%llu us  T2=%llu us  T3=%llu us  RTT_est=%llu us\n",
+                (unsigned long long)RxTime, SenderIp, SenderPort,
+                (unsigned long long)Req->T1,
+                (unsigned long long)Ack.T2,
+                (unsigned long long)Ack.T3,
+                (unsigned long long)(Ack.T3 - Req->T1));
+        } else {
+            printf("[%llu us] UNKNOWN   from %s:%u  type=0x%02X  len=%d bytes\n",
+                (unsigned long long)RxTime, SenderIp, SenderPort, Buf[0], N);
         }
     }
     return 0;
@@ -95,7 +116,13 @@ int main(void) {
     bind(Sock, (struct sockaddr*)&Ba, sizeof(Ba));
     CreateThread(NULL, 0, ListenerThread, NULL, 0, NULL);
     printf("AudioSync Server\n");
-    printf("Listening on port %d. Press ENTER to fire all devices.\n\n", ServerPort);
+    printf("  Server port  : %d (listening for clients)\n", ServerPort);
+    printf("  Client port  : %d (fire/sync packets sent here)\n", ClientPort);
+    printf("  Max clients  : %d\n", MaxClients);
+    printf("  Multicast    : 224.0.0.100:%d\n", ClientPort);
+    printf("  Fire lead    : 500 ms\n");
+    printf("  Fire retries : 4x (20 ms apart)\n");
+    printf("\nPress ENTER to fire all connected devices.\n\n");
     while (1) {
         getchar();
         Client LocalClients[MaxClients];
@@ -111,7 +138,10 @@ int main(void) {
         LeaveCriticalSection(&ClientLock);
         FirePkt Fp;
         Fp.Type       = PtFire;
-        Fp.FireAtPcUs = NowUs() + 500000ULL;  /* 500 ms lead: plenty for delivery + EMA ramp */
+        uint64_t Now  = NowUs();
+        Fp.FireAtPcUs = Now + 500000ULL;  /* 500 ms lead: plenty for delivery + EMA ramp */
+        printf("[%llu us] FIRE      targeting %d device(s)  fire_at=%llu us  (+500 ms from now)\n",
+            (unsigned long long)Now, LocalCount, (unsigned long long)Fp.FireAtPcUs);
         struct sockaddr_in McAddr;
         memset(&McAddr, 0, sizeof(McAddr));
         McAddr.sin_family      = AF_INET;
@@ -121,10 +151,12 @@ int main(void) {
             sendto(Sock, (char*)&Fp, sizeof(Fp), 0, (struct sockaddr*)&McAddr, sizeof(McAddr));
             for (int I = 0; I < LocalCount; I++) {
                 sendto(Sock, (char*)&Fp, sizeof(Fp), 0, (struct sockaddr*)&LocalClients[I].Addr, sizeof(struct sockaddr_in));
+                printf("  [retry %d] -> unicast %s:%d\n", R + 1, LocalClients[I].Ip, ClientPort);
             }
+            printf("  [retry %d] -> multicast 224.0.0.100:%d\n", R + 1, ClientPort);
             if (R < 3) Sleep(20);
         }
-        printf("Fired %d device(s)!\n", LocalCount);
+        printf("[DONE] Fired %d device(s) (4 retries x unicast + multicast).\n\n", LocalCount);
     }
     timeEndPeriod(1);
     return 0;
