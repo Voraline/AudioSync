@@ -77,7 +77,7 @@ static int CmpRtt(const void* A, const void* B) {
 //     return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
 // }
 
-static uint64_t NowNs(void) {
+static uint64_t NowUs(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
 
