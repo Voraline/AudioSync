@@ -72,9 +72,12 @@ static int CmpRtt(const void* A, const void* B) {
 }
 
 static uint64_t NowUs(void) {
+    // struct timespec Ts;
+    // clock_gettime(CLOCK_MONOTONIC, &Ts);
+    // return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
     struct timespec Ts;
     clock_gettime(CLOCK_MONOTONIC, &Ts);
-    return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
+    return (uint64_t)Ts.tv_sec * 1000000000ULL + (uint64_t)Ts.tv_nsec;
 }
 
 static AAudioStream* AudioStream = NULL;
