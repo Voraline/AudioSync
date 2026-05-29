@@ -324,7 +324,8 @@ static void* KeepAliveThread(void* U) {
     uint8_t Ping  = PtRegister;
     int Cycle = 0;
     int SSock = socket(AF_INET, SOCK_DGRAM, 0);
-    int Tos = 0x10, Prio = 6;
+    // int Tos 0x10, Prio = 6;
+    int Tos = 0xB8, Prio = 6;
     setsockopt(SSock, IPPROTO_IP, IP_TOS,      &Tos,  sizeof(Tos));
     setsockopt(SSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 25000};   /* 25 ms timeout — half the probe interval */
