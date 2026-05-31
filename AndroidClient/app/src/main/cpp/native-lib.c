@@ -2,6 +2,7 @@
 #include <jni.h>
 #include <aaudio/AAudio.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -14,6 +15,8 @@
 #include <stdlib.h>
 #include <math.h>                  /* sqrt() for sigma filtering */
 #include <android/log.h>
+#include <linux/net_tstamp.h>      /* SOF_TIMESTAMPING_* flags  */
+#include <linux/errqueue.h>        /* SCM_TIMESTAMPING cmsg type */
 
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
@@ -75,6 +78,98 @@ static uint64_t NowUs(void) {
     struct timespec Ts;
     clock_gettime(CLOCK_MONOTONIC, &Ts);
     return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
+}
+
+static uint64_t NowRealUs(void) {
+    struct timespec Ts;
+    clock_gettime(CLOCK_REALTIME, &Ts);
+    return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
+}
+
+/* ── CLOCK_REALTIME to CLOCK_MONOTONIC delta ─────────────────────────────────
+ * SO_TIMESTAMPING delivers kernel RX timestamps in CLOCK_REALTIME.
+ * Everything else (AAudio, NowUs) uses CLOCK_MONOTONIC.
+ * We measure the delta once at startup — both clocks are stable for the
+ * lifetime of the process, so one measurement is enough.
+ * Formula: mono_us = real_us + RealToMonoDeltaUs                           */
+static int64_t RealToMonoDeltaUs   = 0;
+static int     RealToMonoDeltaInit = 0;
+
+static void InitRealToMonoDelta(void) {
+    if (RealToMonoDeltaInit) return;
+    /* Sample 8 times and take the median so a single scheduler preemption
+     * between the two clock_gettime calls does not corrupt the result.      */
+    int64_t Deltas[8];
+    for (int I = 0; I < 8; I++) {
+        uint64_t R = NowRealUs();
+        uint64_t M = NowUs();
+        Deltas[I] = (int64_t)M - (int64_t)R;
+    }
+    /* Insertion sort — 8 elements only */
+    for (int I = 1; I < 8; I++) {
+        int64_t K = Deltas[I]; int J = I - 1;
+        while (J >= 0 && Deltas[J] > K) { Deltas[J+1] = Deltas[J]; J--; }
+        Deltas[J+1] = K;
+    }
+    RealToMonoDeltaUs   = Deltas[4]; /* median of 8 */
+    RealToMonoDeltaInit = 1;
+    Logi("RealToMonoDelta: %lld us", (long long)RealToMonoDeltaUs);
+}
+
+/* Convert a kernel CLOCK_REALTIME timespec (from SCM_TIMESTAMPING) to the
+ * CLOCK_MONOTONIC microsecond domain used everywhere else in this file.     */
+static uint64_t RealTsToMonoUs(const struct timespec* Ts) {
+    uint64_t RealUs = (uint64_t)Ts->tv_sec * 1000000ULL
+                    + (uint64_t)Ts->tv_nsec / 1000ULL;
+    return (uint64_t)((int64_t)RealUs + RealToMonoDeltaUs);
+}
+
+/* ── EnableKernelRxTs ────────────────────────────────────────────────────────
+ * Ask the kernel to attach a receive timestamp (CLOCK_REALTIME, software) to
+ * every incoming datagram via SCM_TIMESTAMPING cmsg.
+ * Returns 1 on success, 0 if unsupported (RecvWithTs falls back gracefully). */
+static int EnableKernelRxTs(int Fd) {
+    int Flags = SOF_TIMESTAMPING_RX_SOFTWARE   /* stamp at softirq arrival      */
+              | SOF_TIMESTAMPING_SOFTWARE       /* CLOCK_REALTIME software clock */
+              | SOF_TIMESTAMPING_OPT_CMSG       /* deliver via ancillary cmsg    */
+              | SOF_TIMESTAMPING_OPT_TSONLY;    /* no extra bytes in payload     */
+    int Ret = setsockopt(Fd, SOL_SOCKET, SO_TIMESTAMPING, &Flags, sizeof(Flags));
+    if (Ret < 0) Logi("SO_TIMESTAMPING unavailable — using userspace T4 fallback");
+    return (Ret == 0);
+}
+
+/* ── RecvWithTs ──────────────────────────────────────────────────────────────
+ * Drop-in for recv().  Writes the kernel RX timestamp into *T4Out when the
+ * cmsg is present; otherwise writes NowUs() captured right after recvmsg()
+ * returns (same as the old code, but no worse).
+ * The kernel timestamp is taken at softirq time — before the scheduler even
+ * wakes this thread — eliminating 50–300 µs of post-recv() measurement error.*/
+static ssize_t RecvWithTs(int Fd, void* Buf, size_t Len, uint64_t* T4Out) {
+    struct iovec Iov = { .iov_base = Buf, .iov_len = Len };
+    /* Room for one SCM_TIMESTAMPING cmsg carrying struct timespec[3] */
+    uint8_t CtrlBuf[CMSG_SPACE(sizeof(struct timespec) * 3)];
+    struct msghdr Msg;
+    memset(&Msg, 0, sizeof(Msg));
+    Msg.msg_iov        = &Iov;
+    Msg.msg_iovlen     = 1;
+    Msg.msg_control    = CtrlBuf;
+    Msg.msg_controllen = sizeof(CtrlBuf);
+
+    ssize_t N  = recvmsg(Fd, &Msg, 0);
+    *T4Out     = NowUs();   /* userspace fallback — overwritten below if cmsg found */
+
+    if (N > 0) {
+        for (struct cmsghdr* Cm = CMSG_FIRSTHDR(&Msg); Cm; Cm = CMSG_NXTHDR(&Msg, Cm)) {
+            if (Cm->cmsg_level == SOL_SOCKET && Cm->cmsg_type == SCM_TIMESTAMPING) {
+                struct timespec* Ts = (struct timespec*)CMSG_DATA(Cm);
+                /* Ts[0] = SW RX stamp. Non-zero means the kernel filled it. */
+                if (Ts[0].tv_sec != 0 || Ts[0].tv_nsec != 0)
+                    *T4Out = RealTsToMonoUs(&Ts[0]);
+                break;
+            }
+        }
+    }
+    return N;
 }
 
 static AAudioStream* AudioStream = NULL;
@@ -141,6 +236,11 @@ static void DoClockSync(void) {
     setsockopt(SyncSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 200000};
     setsockopt(SyncSock, SOL_SOCKET, SO_RCVTIMEO,  &Tv,   sizeof(Tv));
+    /* Kernel RX timestamping: stamps the packet at softirq arrival, before
+     * recvmsg() even wakes this thread.  Removes 50–300 µs of post-recv()
+     * measurement error from T4, making every RTT and offset sample tighter. */
+    InitRealToMonoDelta();
+    EnableKernelRxTs(SyncSock);
 
     /* 512 samples * 20 ms apart = ~10.24 seconds of collection.
      * 20 ms gap lets the WiFi TX queue drain between probes so consecutive
@@ -156,8 +256,8 @@ static void DoClockSync(void) {
         uint64_t T1 = NowUs();
         Req.T1      = T1;
         sendto(SyncSock, &Req, sizeof(Req), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
-        ssize_t  N  = recv(SyncSock, RxBuf, sizeof(RxBuf), 0);
-        uint64_t T4 = NowUs();
+        uint64_t T4 = 0;
+        ssize_t  N  = RecvWithTs(SyncSock, RxBuf, sizeof(RxBuf), &T4);
         nanosleep(&Gap, NULL);                   /* always wait, even on failure */
         if (N < (ssize_t)sizeof(SyncAckPkt)) continue;
         SyncAckPkt* Ack = (SyncAckPkt*)RxBuf;
@@ -237,8 +337,8 @@ static void DoRollingProbe(int SSock) {
     Req.T1      = T1;
     sendto(SSock, &Req, sizeof(Req), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
     uint8_t RxBuf[64];
-    ssize_t  N  = recv(SSock, RxBuf, sizeof(RxBuf), 0);
-    uint64_t T4 = NowUs();
+    uint64_t T4 = 0;
+    ssize_t  N  = RecvWithTs(SSock, RxBuf, sizeof(RxBuf), &T4);
     if (N < (ssize_t)sizeof(SyncAckPkt)) return;
     SyncAckPkt* Ack = (SyncAckPkt*)RxBuf;
     if (Ack->Type != PtSyncAck || Ack->T1 != T1) return;
@@ -328,6 +428,9 @@ static void* KeepAliveThread(void* U) {
     setsockopt(SSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 25000};   /* 25 ms timeout — half the probe interval */
     setsockopt(SSock, SOL_SOCKET, SO_RCVTIMEO, &Tv,  sizeof(Tv));
+    /* Same kernel RX timestamping as DoClockSync — every rolling probe gets an
+     * accurate T4 so the EMA tracks real drift rather than scheduler jitter.  */
+    EnableKernelRxTs(SSock);
     while (atomic_load_explicit(&Running, memory_order_relaxed)) {
         sendto(Sock, &Ping, 1, 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
         DoRollingProbe(SSock);
