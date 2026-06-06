@@ -1,0 +1,17 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.audiosync.app'
+    compileSdk 34
+    ndkVersion "25.1.8937393"
+    defaultConfig {
+        applicationId "com.audiosync.app"
+        minSdk 28
+        targetSdk 34
+        externalNativeBuild { cmake { cFlags "-std=c11" } }
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    buildTypes { release { minifyEnabled true; shrinkResources true; debuggable false; jniDebuggable false; signingConfig signingConfigs.debug; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' } }
+    externalNativeBuild { cmake { path file("src/main/cpp/CMakeLists.txt"); version "3.22.1" } }
+    packaging { jniLibs { useLegacyPackaging false } }
+}
+dependencies {}
