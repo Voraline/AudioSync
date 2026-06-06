@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  Windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S WindowsServer -B WindowsServer/Build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build WindowsServer/Build --config Release
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioSyncServer
+          path: WindowsServer/Build/Release/AudioSyncServer.exe
+
+  Android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: SetupJava
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: SetupGradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.3"
+
+      - name: SetupNdk
+        run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.1.8937393"
+
+      - name: DownloadMinimp3
+        run: curl -fsSL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o AndroidClient/app/src/main/cpp/minimp3.h
+
+      - name: Build
+        working-directory: AndroidClient
+        run: gradle assembleRelease
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioSync
+          path: AndroidClient/app/build/outputs/apk/release/*.apk
