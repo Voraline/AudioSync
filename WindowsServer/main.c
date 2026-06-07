@@ -68,8 +68,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             SyncAckPkt Ack;
             Ack.Type = PtSyncAck;
             Ack.T1   = Req->T1;
-            Ack.T2   = NowUs();
-            Ack.T3   = NowUs();
+            Ack.T2 = Ack.T3 = NowUs();
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
         }
     }
