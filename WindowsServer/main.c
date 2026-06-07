@@ -78,7 +78,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
 
 int main(void) {
     timeBeginPeriod(1);
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
     InitializeCriticalSection(&ClientLock);
     WSADATA Wsa;
     WSAStartup(MAKEWORD(2,2), &Wsa);
