@@ -561,9 +561,22 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AAudioStreamBuilder_setPerformanceMode(Bld, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(Bld,     AAUDIO_SHARING_MODE_EXCLUSIVE);
     AAudioStream* Probe;
-    if (AAudioStreamBuilder_openStream(Bld, &Probe) != AAUDIO_OK) {
-        AAudioStreamBuilder_delete(Bld);
-        return;
+    aaudio_result_t ProbeResult = AAudioStreamBuilder_openStream(Bld, &Probe);
+    int UsedExclusive = 1;
+    if (ProbeResult != AAUDIO_OK) {
+        /* Most devices (anything without MMAP support, i.e. most non-Pixel
+           phones) reject EXCLUSIVE sharing mode outright. Fall back to
+           SHARED mode instead of silently bailing out and leaving the
+           UI stuck on "Armed" forever. */
+        Logi("Exclusive stream unavailable (%d), falling back to shared mode", (int)ProbeResult);
+        UsedExclusive = 0;
+        AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
+        ProbeResult = AAudioStreamBuilder_openStream(Bld, &Probe);
+        if (ProbeResult != AAUDIO_OK) {
+            Loge("Failed to open probe audio stream (%d)", (int)ProbeResult);
+            AAudioStreamBuilder_delete(Bld);
+            return;
+        }
     }
     int32_t Burst = AAudioStream_getFramesPerBurst(Probe);
     int32_t NativeRate = AAudioStream_getSampleRate(Probe);
@@ -574,13 +587,23 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AAudioStreamBuilder_setChannelCount(Bld,          2);
     if (NativeRate > 0) AAudioStreamBuilder_setSampleRate(Bld, NativeRate);
     AAudioStreamBuilder_setPerformanceMode(Bld,       AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setSharingMode(Bld,           AAUDIO_SHARING_MODE_EXCLUSIVE);
+    AAudioStreamBuilder_setSharingMode(Bld,           UsedExclusive ? AAUDIO_SHARING_MODE_EXCLUSIVE : AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setUsage(Bld,                 AAUDIO_USAGE_GAME);
     AAudioStreamBuilder_setContentType(Bld,           AAUDIO_CONTENT_TYPE_SONIFICATION);
     AAudioStreamBuilder_setDataCallback(Bld,          AudioCallback, NULL);
     AAudioStreamBuilder_setFramesPerDataCallback(Bld, Burst);
     AAudioStream* St;
-    if (AAudioStreamBuilder_openStream(Bld, &St) != AAUDIO_OK) {
+    aaudio_result_t OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
+    if (OpenResult != AAUDIO_OK && UsedExclusive) {
+        /* Exclusive probe succeeded but the real stream (with callback/usage
+           set) failed to open exclusively - retry once in shared mode
+           rather than giving up. */
+        Logi("Exclusive stream open failed (%d), retrying shared", (int)OpenResult);
+        AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
+        OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
+    }
+    if (OpenResult != AAUDIO_OK) {
+        Loge("Failed to open audio stream (%d)", (int)OpenResult);
         AAudioStreamBuilder_delete(Bld);
         return;
     }
