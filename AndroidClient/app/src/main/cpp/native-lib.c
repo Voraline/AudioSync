@@ -54,7 +54,6 @@ static _Atomic int64_t  ClockOffsetUs = 0;
 static _Atomic int64_t  OutputTrimUs  = 0;
 static _Atomic uint64_t LastFirePcUs  = 0;
 
-
 static int                Sock = -1;
 static char               SrvIp[64];
 static struct sockaddr_in SrvAddr;
@@ -564,10 +563,6 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     aaudio_result_t ProbeResult = AAudioStreamBuilder_openStream(Bld, &Probe);
     int UsedExclusive = 1;
     if (ProbeResult != AAUDIO_OK) {
-        /* Most devices (anything without MMAP support, i.e. most non-Pixel
-           phones) reject EXCLUSIVE sharing mode outright. Fall back to
-           SHARED mode instead of silently bailing out and leaving the
-           UI stuck on "Armed" forever. */
         Logi("Exclusive stream unavailable (%d), falling back to shared mode", (int)ProbeResult);
         UsedExclusive = 0;
         AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
@@ -595,9 +590,6 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AAudioStream* St;
     aaudio_result_t OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
     if (OpenResult != AAUDIO_OK && UsedExclusive) {
-        /* Exclusive probe succeeded but the real stream (with callback/usage
-           set) failed to open exclusively - retry once in shared mode
-           rather than giving up. */
         Logi("Exclusive stream open failed (%d), retrying shared", (int)OpenResult);
         AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
         OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
