@@ -10,10 +10,6 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winmm.lib")
 
-/* ---- SIO_TIMESTAMPING support (Windows 10 1809+ / Server 2019+) ----
-   Not always present in older SDK headers, so define the bits we need
-   ourselves and probe for support at runtime. Falls back cleanly to
-   userspace NowUs() on anything that doesn't support it. */
 #ifndef SIO_TIMESTAMPING
 #define SIO_TIMESTAMPING _WSAIOW(IOC_VENDOR, 28)
 typedef struct _TIMESTAMPING_CONFIG {
@@ -59,15 +55,11 @@ static uint64_t NowUs(void) {
 }
 
 static LPFN_WSARECVMSG WSARecvMsgPtr   = NULL;
-static int             SioTimestamping = 0; /* RX cmsg is QPC-domain */
-static int             PlainSoTimestamp = 0; /* RX cmsg is FILETIME-domain, needs calibration */
+static int             SioTimestamping = 0;
+static int             PlainSoTimestamp = 0;
 static int64_t         FileTimeToQpcUsDelta = 0;
 static int             FileTimeToQpcInit = 0;
 
-/* FILETIME (100ns ticks since 1601) -> our QPC-derived NowUs() domain.
-   Same idea as the Android client's RealToMonoDeltaUs: sample both
-   clocks back-to-back several times and take the median delta to
-   cancel out scheduling noise in the calibration itself. */
 static void InitFileTimeToQpcDelta(void) {
     if (FileTimeToQpcInit) return;
     int64_t Deltas[8];
@@ -116,10 +108,6 @@ static int EnableKernelRxTs(SOCKET S) {
     return 0;
 }
 
-/* Receives a datagram and returns the best available timestamp for when
-   it arrived at the kernel, falling back to a NowUs() call taken
-   immediately after the syscall returns if no kernel timestamp is
-   present in this packet's control data. */
 static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, uint64_t* TsOut) {
     if (WSARecvMsgPtr != NULL && (SioTimestamping || PlainSoTimestamp)) {
         WSABUF Wb;
@@ -145,16 +133,13 @@ static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, ui
                 ULONGLONG Raw = *(ULONGLONG*)WSA_CMSG_DATA(Cm);
                 if (Raw > 0) {
                     if (SioTimestamping) {
-                        /* SIO_TIMESTAMPING delivers QPC ticks directly. */
-                        LARGE_INTEGER F;
-                        QueryPerformanceFrequency(&F);
+                        static LARGE_INTEGER F;
+                        static int FInit = 0;
+                        if (!FInit) { QueryPerformanceFrequency(&F); FInit = 1; }
                         uint64_t Us = Raw * 1000000ULL / (uint64_t)F.QuadPart;
                         *TsOut = Us;
                         return (int)N;
                     } else {
-                        /* Plain SO_TIMESTAMP delivers FILETIME (100ns
-                           ticks since 1601). Convert to our QPC domain
-                           using the calibrated offset. */
                         uint64_t FtUs = Raw / 10ULL;
                         *TsOut = (uint64_t)((int64_t)FtUs + FileTimeToQpcUsDelta);
                         return (int)N;
@@ -176,10 +161,6 @@ static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, ui
 static DWORD WINAPI ListenerThread(void* Unused) {
     (void)Unused;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-    /* Pin to a fixed core so the response path doesn't get bounced
-       between cores mid-handling (cache + scheduler jitter), mirroring
-       the affinity pinning the Android client does for its sync thread.
-       Use the last logical core, leaving core 0 free for system/ISR work. */
     DWORD_PTR ProcMask, SysMask;
     if (GetProcessAffinityMask(GetCurrentProcess(), &ProcMask, &SysMask)) {
         DWORD_PTR Pinned = 0;
@@ -215,8 +196,8 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             SyncAckPkt Ack;
             Ack.Type = PtSyncAck;
             Ack.T1   = Req->T1;
-            Ack.T2   = T2;       /* kernel/driver RX timestamp, not post-hoc */
-            Ack.T3   = NowUs();  /* captured immediately before the send */
+            Ack.T2   = T2;
+            Ack.T3   = NowUs();
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
         }
     }
