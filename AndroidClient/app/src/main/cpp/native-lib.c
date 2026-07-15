@@ -223,6 +223,9 @@ static float RenderSample(double SourceFrame, int OutChannel) {
     return InterpolateSource(SourceFrame, Channel);
 }
 
+static double SmoothedOffsetUs = 0.0;
+static int    SmoothedOffsetInit = 0;
+
 static aaudio_data_callback_result_t AudioCallback(AAudioStream* St, void* U, void* Data, int32_t NumFrames) {
     (void)U;
     float* Out = (float*)Data;
@@ -240,7 +243,14 @@ static aaudio_data_callback_result_t AudioCallback(AAudioStream* St, void* U, vo
     } else {
         WritePresentsUs = (int64_t)NowUs();
     }
-    double CurrentServerTimeUs = (double)WritePresentsUs + (double)atomic_load_explicit(&ClockOffsetUs, memory_order_relaxed);
+    double TargetOffsetUs = (double)atomic_load_explicit(&ClockOffsetUs, memory_order_relaxed);
+    if (!SmoothedOffsetInit) { SmoothedOffsetUs = TargetOffsetUs; SmoothedOffsetInit = 1; }
+    double MaxStepUs = 1000000.0 / (double)StreamSampleRate;
+    double OffsetDiff = TargetOffsetUs - SmoothedOffsetUs;
+    if (OffsetDiff > MaxStepUs) OffsetDiff = MaxStepUs;
+    if (OffsetDiff < -MaxStepUs) OffsetDiff = -MaxStepUs;
+    SmoothedOffsetUs += OffsetDiff;
+    double CurrentServerTimeUs = (double)WritePresentsUs + SmoothedOffsetUs;
     double TargetFirePcUs      = (double)atomic_load_explicit(&LastFirePcUs, memory_order_relaxed)
                                + (double)atomic_load_explicit(&OutputTrimUs, memory_order_relaxed);
     double SourceFrame = (CurrentServerTimeUs - TargetFirePcUs) * (double)PcmSampleRate / 1000000.0;
@@ -553,6 +563,7 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     if (PcmFrames == 0 || Sock == -1) return;
     Logi("Opening audio stream");
     atomic_store_explicit(&LastFirePcUs, 0, memory_order_release);
+    SmoothedOffsetInit = 0;
     AAudioStreamBuilder* Bld;
     AAudio_createStreamBuilder(&Bld);
     AAudioStreamBuilder_setFormat(Bld,          AAUDIO_FORMAT_PCM_FLOAT);
