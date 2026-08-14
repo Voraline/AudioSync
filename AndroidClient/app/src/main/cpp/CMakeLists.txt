@@ -15,6 +15,7 @@ target_compile_options(audiosync PRIVATE
     -fno-common
     -fno-math-errno
     -ffp-contract=on
+    -falign-functions=32
     -fno-stack-protector
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
@@ -33,6 +34,9 @@ target_link_options(audiosync PRIVATE
     -Wl,-O3
     -Wl,--as-needed
     -Wl,--icf=all
+    -Wl,-Bsymbolic
+    -Wl,--hash-style=gnu
+    -Wl,-z,lazy
     -Wl,-z,norelro
     -Wl,-z,noseparate-code
     -Wl,--build-id=none
