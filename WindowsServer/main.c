@@ -93,6 +93,7 @@ static int EnableKernelRxTs(SOCKET S) {
     if (WSAIoctl(S, SIO_GET_EXTENSION_FUNCTION_POINTER,
                  &Guid, sizeof(Guid), &WSARecvMsgPtr, sizeof(WSARecvMsgPtr),
                  &Bytes, NULL, NULL) != 0) {
+        printf("  [TS] WSARecvMsg extension lookup failed, WSAGetLastError=%d\n", WSAGetLastError());
         WSARecvMsgPtr = NULL;
         return 0;
     }
@@ -105,6 +106,7 @@ static int EnableKernelRxTs(SOCKET S) {
         SioTimestamping = 1;
         return 1;
     }
+    printf("  [TS] SIO_TIMESTAMPING (hardware) unsupported by this NIC/driver, WSAGetLastError=%d\n", WSAGetLastError());
 
     BOOL TsOn = TRUE;
     if (setsockopt(S, SOL_SOCKET, SO_TIMESTAMP, (char*)&TsOn, sizeof(TsOn)) == 0) {
@@ -112,6 +114,7 @@ static int EnableKernelRxTs(SOCKET S) {
         InitFileTimeToQpcDelta();
         return 1;
     }
+    printf("  [TS] SO_TIMESTAMP also unsupported, WSAGetLastError=%d\n", WSAGetLastError());
 
     return 0;
 }
