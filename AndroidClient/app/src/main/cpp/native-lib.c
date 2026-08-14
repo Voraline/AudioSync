@@ -282,7 +282,9 @@ static void DoClockSync(void) {
     struct timeval Tv = {0, 200000};
     setsockopt(SyncSock, SOL_SOCKET, SO_RCVTIMEO,  &Tv,   sizeof(Tv));
     InitRealToMonoDelta();
-    EnableKernelRxTs(SyncSock);
+    int SioTimestampingActive = EnableKernelRxTs(SyncSock);
+    Logi("ClockSync: RX timestamp mode = %s",
+         SioTimestampingActive ? "kernel SO_TIMESTAMPING" : "userspace fallback");
 
     static SyncSample Samples[MaxSyncSamples];
     int SampleCount = 0;
@@ -311,8 +313,10 @@ static void DoClockSync(void) {
 
     qsort(Samples, (size_t)SampleCount, sizeof(SyncSample), CmpRtt);
 
-    int TopN = 10;
-    if (TopN > SampleCount) TopN = SampleCount;
+    int64_t MinRtt = Samples[0].Rtt;
+    int TopN = 0;
+    while (TopN < SampleCount && Samples[TopN].Rtt <= MinRtt + (MinRtt / 5) + 200) TopN++;
+    if (TopN < 8) TopN = (SampleCount < 8) ? SampleCount : 8;
 
     double Sum = 0.0;
     for (int I = 0; I < TopN; I++) Sum += (double)Samples[I].Offset;
@@ -340,23 +344,25 @@ static void DoClockSync(void) {
     int64_t FinalOffset = (int64_t)(FinalSum / (double)FinalCount);
     atomic_store_explicit(&ClockOffsetUs, FinalOffset, memory_order_release);
 
+    double Sem = (FinalCount > 1) ? Sigma / sqrt((double)FinalCount) : Sigma;
+
     ProbeRingHead = 0;
     ProbeRingFull = 0;
 
-    Logi("ClockSync: collected=%d  filtered=%d  final=%d  "
-         "offset=%lld us  minRTT=%lld us  sigma=%.1f us",
+    Logi("ClockSync: collected=%d  rttFiltered=%d  final=%d  "
+         "offset=%lld us  minRTT=%lld us  sigma=%.1f us  precision(SEM)=%.1f us",
          SampleCount, TopN, FinalCount,
          (long long)FinalOffset,
-         (long long)Samples[0].Rtt,
-         Sigma);
+         (long long)MinRtt,
+         Sigma, Sem);
 
     if (Sock != -1) {
         SyncInfoPkt Info;
         Info.Type        = PtSyncInfo;
         Info.OffsetUs    = FinalOffset;
-        Info.RttUs       = Samples[0].Rtt;
+        Info.RttUs       = MinRtt;
         Info.SampleCount = (int32_t)SampleCount;
-        Info.SigmaUs     = (float)Sigma;
+        Info.SigmaUs     = (float)Sem;
         sendto(Sock, &Info, sizeof(Info), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
     }
 }

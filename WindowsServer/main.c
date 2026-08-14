@@ -227,7 +227,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
                 Clients[Idx].HasSyncInfo  = 1;
                 Clients[Idx].LastOffsetUs = Info->OffsetUs;
                 Clients[Idx].LastRttUs    = Info->RttUs;
-                printf("  = Device %s synced: offset=%+lld us  rtt=%lld us  samples=%d  sigma=%.1f us\n",
+                printf("  = Device %s synced: offset=%+lld us  minRTT=%lld us  samples=%d  precision=%.1f us\n",
                        Clients[Idx].Ip,
                        (long long)Info->OffsetUs,
                        (long long)Info->RttUs,
@@ -258,6 +258,10 @@ int main(void) {
     Ba.sin_port   = htons(ServerPort);
     bind(Sock, (struct sockaddr*)&Ba, sizeof(Ba));
     CreateThread(NULL, 0, ListenerThread, NULL, 0, NULL);
+    Sleep(50);
+    printf("RX timestamp mode = %s\n",
+           SioTimestamping ? "kernel SIO_TIMESTAMPING" :
+           PlainSoTimestamp ? "SO_TIMESTAMP fallback" : "userspace NowUs() fallback");
     printf("AudioSync Server\n");
     printf("Listening on port %d. Press ENTER to fire all devices.\n\n", ServerPort);
     while (1) {
