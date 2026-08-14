@@ -31,14 +31,22 @@ typedef struct _TIMESTAMPING_CONFIG {
 #define PtSyncReq  0x02
 #define PtSyncAck  0x03
 #define PtFire     0x04
+#define PtSyncInfo 0x05
 
 #pragma pack(push,1)
 typedef struct { uint8_t Type; uint64_t T1; } SyncReqPkt;
 typedef struct { uint8_t Type; uint64_t T1; uint64_t T2; uint64_t T3; } SyncAckPkt;
 typedef struct { uint8_t Type; uint64_t FireAtPcUs; } FirePkt;
+typedef struct { uint8_t Type; int64_t OffsetUs; int64_t RttUs; int32_t SampleCount; float SigmaUs; } SyncInfoPkt;
 #pragma pack(pop)
 
-typedef struct { struct sockaddr_in Addr; char Ip[32]; } Client;
+typedef struct {
+    struct sockaddr_in Addr;
+    char    Ip[32];
+    int     HasSyncInfo;
+    int64_t LastOffsetUs;
+    int64_t LastRttUs;
+} Client;
 
 static SOCKET Sock;
 static Client Clients[MaxClients];
@@ -199,6 +207,24 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             Ack.T2   = T2;
             Ack.T3   = NowUs();
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
+        } else if (Buf[0] == PtSyncInfo && N >= (int)sizeof(SyncInfoPkt)) {
+            SyncInfoPkt* Info = (SyncInfoPkt*)Buf;
+            EnterCriticalSection(&ClientLock);
+            for (int I = 0; I < ClientCount; I++) {
+                if (Clients[I].Addr.sin_addr.s_addr == From.sin_addr.s_addr) {
+                    Clients[I].HasSyncInfo  = 1;
+                    Clients[I].LastOffsetUs = Info->OffsetUs;
+                    Clients[I].LastRttUs    = Info->RttUs;
+                    printf("  = Device %s synced: offset=%+lld us  rtt=%lld us  samples=%d  sigma=%.1f us\n",
+                           Clients[I].Ip,
+                           (long long)Info->OffsetUs,
+                           (long long)Info->RttUs,
+                           Info->SampleCount,
+                           Info->SigmaUs);
+                    break;
+                }
+            }
+            LeaveCriticalSection(&ClientLock);
         }
     }
     return 0;
@@ -237,6 +263,17 @@ int main(void) {
         LocalCount = ClientCount;
         memcpy(LocalClients, Clients, (size_t)ClientCount * sizeof(Client));
         LeaveCriticalSection(&ClientLock);
+        printf("\n  Device clock offsets:\n");
+        for (int I = 0; I < LocalCount; I++) {
+            if (LocalClients[I].HasSyncInfo) {
+                printf("    Device %d (%s): offset=%+lld us  rtt=%lld us\n",
+                       I + 1, LocalClients[I].Ip,
+                       (long long)LocalClients[I].LastOffsetUs,
+                       (long long)LocalClients[I].LastRttUs);
+            } else {
+                printf("    Device %d (%s): not synced yet\n", I + 1, LocalClients[I].Ip);
+            }
+        }
         FirePkt Fp;
         Fp.Type       = PtFire;
         Fp.FireAtPcUs = NowUs() + 500000ULL;

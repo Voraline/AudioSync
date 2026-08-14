@@ -29,16 +29,18 @@
 
 #define ServerPort     11000
 #define ClientPort     11001
-#define MaxSyncSamples 1000
+#define MaxSyncSamples 4000
 
 #define PtRegister 0x01
 #define PtSyncReq  0x02
 #define PtSyncAck  0x03
 #define PtFire     0x04
+#define PtSyncInfo 0x05
 
 typedef struct __attribute__((packed)) { uint8_t Type; uint64_t T1; }                           SyncReqPkt;
 typedef struct __attribute__((packed)) { uint8_t Type; uint64_t T1; uint64_t T2; uint64_t T3; } SyncAckPkt;
 typedef struct __attribute__((packed)) { uint8_t Type; uint64_t FireAtPcUs; }                   FirePkt;
+typedef struct __attribute__((packed)) { uint8_t Type; int64_t OffsetUs; int64_t RttUs; int32_t SampleCount; float SigmaUs; } SyncInfoPkt;
 typedef struct { int64_t Rtt; int64_t Offset; } SyncSample;
 
 static float*   PcmBuf        = NULL;
@@ -347,6 +349,16 @@ static void DoClockSync(void) {
          (long long)FinalOffset,
          (long long)Samples[0].Rtt,
          Sigma);
+
+    if (Sock != -1) {
+        SyncInfoPkt Info;
+        Info.Type        = PtSyncInfo;
+        Info.OffsetUs    = FinalOffset;
+        Info.RttUs       = Samples[0].Rtt;
+        Info.SampleCount = (int32_t)SampleCount;
+        Info.SigmaUs     = (float)Sigma;
+        sendto(Sock, &Info, sizeof(Info), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
+    }
 }
 
 static void DoRollingProbe(int SSock) {
@@ -417,7 +429,6 @@ static void* KeepAliveThread(void* U) {
     KaSp.sched_priority = sched_get_priority_max(SCHED_FIFO);
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &KaSp);
     uint8_t Ping  = PtRegister;
-    int Cycle = 0;
     int SSock = socket(AF_INET, SOCK_DGRAM, 0);
     int Tos = 0xB8, Prio = 6;
     setsockopt(SSock, IPPROTO_IP, IP_TOS,      &Tos,  sizeof(Tos));
@@ -430,10 +441,6 @@ static void* KeepAliveThread(void* U) {
         DoRollingProbe(SSock);
         struct timespec Ts = {0, 30000000};
         nanosleep(&Ts, NULL);
-        if (++Cycle >= 10000) {
-            Cycle = 0;
-            DoClockSync();
-        }
     }
     close(SSock);
     return NULL;
