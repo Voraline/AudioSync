@@ -14,6 +14,8 @@ target_compile_options(AudioSyncServer PRIVATE
     $<$<CONFIG:Release>:/fp:precise>
     $<$<CONFIG:Release>:/fp:contract>
     $<$<CONFIG:Release>:/arch:AVX2>
+    $<$<CONFIG:Release>:/Oi>
+    $<$<CONFIG:Release>:/Ot>
     /W4
 )
 
