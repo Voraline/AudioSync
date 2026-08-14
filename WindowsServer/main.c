@@ -53,6 +53,34 @@ static Client Clients[MaxClients];
 static int ClientCount = 0;
 static CRITICAL_SECTION ClientLock;
 
+static void PrintCancellationForPair(int IndexA, int IndexB) {
+    int64_t DeltaUs = Clients[IndexA].LastOffsetUs - Clients[IndexB].LastOffsetUs;
+    if (DeltaUs < 0) DeltaUs = -DeltaUs;
+    if (DeltaUs == 0) {
+        printf("      Device %d vs Device %d: mismatch=0 us (no cancellation)\n", IndexA + 1, IndexB + 1);
+        return;
+    }
+    double DeltaSec = (double)DeltaUs / 1000000.0;
+    double CancelHz = 1.0 / (2.0 * DeltaSec);
+    printf("      Device %d vs Device %d: mismatch=%lld us -> first cancel at %.1f Hz\n",
+           IndexA + 1, IndexB + 1, (long long)DeltaUs, CancelHz);
+}
+
+static void EvaluateDelayMismatches(void) {
+    int SyncedIdx[MaxClients];
+    int SyncedCount = 0;
+    for (int I = 0; I < ClientCount; I++) {
+        if (Clients[I].HasSyncInfo) SyncedIdx[SyncedCount++] = I;
+    }
+    if (SyncedCount < 2) return;
+    printf("    Delay mismatch analysis:\n");
+    for (int I = 0; I < SyncedCount; I++) {
+        for (int J = I + 1; J < SyncedCount; J++) {
+            PrintCancellationForPair(SyncedIdx[I], SyncedIdx[J]);
+        }
+    }
+}
+
 static uint64_t NowUs(void) {
     static LARGE_INTEGER F;
     static int Init = 0;
@@ -236,6 +264,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
                        (long long)Info->RttUs,
                        Info->SampleCount,
                        Info->SigmaUs);
+                EvaluateDelayMismatches();
             }
             LeaveCriticalSection(&ClientLock);
         }
