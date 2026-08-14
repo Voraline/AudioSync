@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winmm.lib")
 
@@ -46,6 +47,7 @@ typedef struct {
     int     HasSyncInfo;
     int64_t LastOffsetUs;
     int64_t LastRttUs;
+    float   LastSigmaUs;
 } Client;
 
 static SOCKET Sock;
@@ -54,16 +56,17 @@ static int ClientCount = 0;
 static CRITICAL_SECTION ClientLock;
 
 static void PrintCancellationForPair(int IndexA, int IndexB) {
-    int64_t DeltaUs = Clients[IndexA].LastOffsetUs - Clients[IndexB].LastOffsetUs;
-    if (DeltaUs < 0) DeltaUs = -DeltaUs;
-    if (DeltaUs == 0) {
-        printf("      Device %d vs Device %d: mismatch=0 us (no cancellation)\n", IndexA + 1, IndexB + 1);
+    float SigmaA = Clients[IndexA].LastSigmaUs;
+    float SigmaB = Clients[IndexB].LastSigmaUs;
+    double DeltaUs = sqrt((double)SigmaA * (double)SigmaA + (double)SigmaB * (double)SigmaB);
+    if (DeltaUs <= 0.0) {
+        printf("      Device %d vs Device %d: mismatch=0.0 us (no cancellation)\n", IndexA + 1, IndexB + 1);
         return;
     }
-    double DeltaSec = (double)DeltaUs / 1000000.0;
+    double DeltaSec = DeltaUs / 1000000.0;
     double CancelHz = 1.0 / (2.0 * DeltaSec);
-    printf("      Device %d vs Device %d: mismatch=%lld us -> first cancel at %.1f Hz\n",
-           IndexA + 1, IndexB + 1, (long long)DeltaUs, CancelHz);
+    printf("      Device %d vs Device %d: est. mismatch=%.1f us -> first cancel at %.1f Hz\n",
+           IndexA + 1, IndexB + 1, DeltaUs, CancelHz);
 }
 
 static void EvaluateDelayMismatches(void) {
@@ -258,6 +261,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
                 Clients[Idx].HasSyncInfo  = 1;
                 Clients[Idx].LastOffsetUs = Info->OffsetUs;
                 Clients[Idx].LastRttUs    = Info->RttUs;
+                Clients[Idx].LastSigmaUs  = Info->SigmaUs;
                 printf("  = Device %s synced: offset=%+lld us  minRTT=%lld us  samples=%d  precision=%.1f us\n",
                        Clients[Idx].Ip,
                        (long long)Info->OffsetUs,

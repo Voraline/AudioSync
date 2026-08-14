@@ -19,7 +19,7 @@ public class MainActivity extends Activity {
     public native String NativeDecodeMp3(byte[] Mp3Data);
     public native void NativeSetConsoleSink();
     public native void NativeClearConsoleSink();
-    public native void NativeSetOutputTrimUs(int TrimUs);
+    public native void NativeSetOutputTrimUs(double TrimUs);
     public native void NativeConnect(String Ip);
     public native void NativeStartReceiveLoop();
     public native void NativeDisconnect();
@@ -60,9 +60,9 @@ public class MainActivity extends Activity {
         PickBtn = new Button(this); PickBtn.setText("PICK MP3 FILE"); PickBtn.setLayoutParams(FullW);
         IpField = new EditText(this); IpField.setHint("PC IP  (e.g. 192.168.1.100)");
         IpField.setSingleLine(true); IpField.setLayoutParams(WithMargin);
-        TrimUsField = new EditText(this); TrimUsField.setHint("TRIM US (+ LATER)");
+        TrimUsField = new EditText(this); TrimUsField.setHint("TRIM MS (+ LATER)");
         TrimUsField.setSingleLine(true); TrimUsField.setText("0");
-        TrimUsField.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        TrimUsField.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         TrimUsField.setLayoutParams(WithMargin);
         ConnectBtn = new Button(this); ConnectBtn.setText("CONNECT & ARM");
         ConnectBtn.setLayoutParams(WithMargin); ConnectBtn.setEnabled(false);
@@ -90,7 +90,7 @@ public class MainActivity extends Activity {
         ConnectBtn.setOnClickListener(V -> {
             String Ip = IpField.getText().toString().trim();
             if (Ip.isEmpty()) { SetStatus("Enter the PC IP address."); return; }
-            Integer TrimUs = ReadTrimUs();
+            Double TrimUs = ReadTrimUs();
             if (TrimUs == null) { SetStatus("Trim must be a number."); return; }
             StartEngine(Ip, TrimUs);
         });
@@ -138,16 +138,17 @@ public class MainActivity extends Activity {
     private String FormatDur(float Secs) {
         return String.format("%d:%02d", (int) Secs / 60, (int) Secs % 60);
     }
-    private Integer ReadTrimUs() {
+    private Double ReadTrimUs() {
         String Raw = TrimUsField.getText().toString().trim();
-        if (Raw.isEmpty()) return 0;
+        if (Raw.isEmpty()) return 0.0;
         try {
-            return Integer.parseInt(Raw);
+            double Ms = Double.parseDouble(Raw);
+            return Ms * 1000.0;
         } catch (NumberFormatException E) {
             return null;
         }
     }
-    private void StartEngine(String Ip, int TrimUs) {
+    private void StartEngine(String Ip, double TrimUs) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             getWindow().setSustainedPerformanceMode(true);
         }

@@ -53,7 +53,7 @@ static int      StreamSampleRate = 48000;
 static _Atomic int      Running       = 0;
 static _Atomic int      FireReady     = 0;
 static _Atomic int64_t  ClockOffsetUs = 0;
-static _Atomic int64_t  OutputTrimUs  = 0;
+static _Atomic double   OutputTrimUs  = 0;
 static _Atomic uint64_t LastFirePcUs  = 0;
 
 static int                Sock = -1;
@@ -254,7 +254,7 @@ static aaudio_data_callback_result_t AudioCallback(AAudioStream* St, void* U, vo
     SmoothedOffsetUs += OffsetDiff;
     double CurrentServerTimeUs = (double)WritePresentsUs + SmoothedOffsetUs;
     double TargetFirePcUs      = (double)atomic_load_explicit(&LastFirePcUs, memory_order_relaxed)
-                               + (double)atomic_load_explicit(&OutputTrimUs, memory_order_relaxed);
+                               + atomic_load_explicit(&OutputTrimUs, memory_order_relaxed);
     double SourceFrame = (CurrentServerTimeUs - TargetFirePcUs) * (double)PcmSampleRate / 1000000.0;
     double SourceStep = (double)PcmSampleRate / (double)StreamSampleRate;
     for (int32_t I = 0; I < NumFrames; I++) {
@@ -525,9 +525,9 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeClearConsoleSin
     pthread_mutex_unlock(&ConsoleLock);
 }
 
-JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeSetOutputTrimUs(JNIEnv* Env, jobject Obj, jint TrimUs) {
+JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeSetOutputTrimUs(JNIEnv* Env, jobject Obj, jdouble TrimUs) {
     (void)Env; (void)Obj;
-    atomic_store_explicit(&OutputTrimUs, (int64_t)TrimUs, memory_order_release);
+    atomic_store_explicit(&OutputTrimUs, (double)TrimUs, memory_order_release);
 }
 
 JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeConnect(JNIEnv* Env, jobject Obj, jstring IpStr) {
