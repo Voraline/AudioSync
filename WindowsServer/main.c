@@ -209,20 +209,30 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
         } else if (Buf[0] == PtSyncInfo && N >= (int)sizeof(SyncInfoPkt)) {
             SyncInfoPkt* Info = (SyncInfoPkt*)Buf;
+            struct sockaddr_in Ca = From;
+            Ca.sin_port = htons(ClientPort);
             EnterCriticalSection(&ClientLock);
+            int Idx = -1;
             for (int I = 0; I < ClientCount; I++) {
-                if (Clients[I].Addr.sin_addr.s_addr == From.sin_addr.s_addr) {
-                    Clients[I].HasSyncInfo  = 1;
-                    Clients[I].LastOffsetUs = Info->OffsetUs;
-                    Clients[I].LastRttUs    = Info->RttUs;
-                    printf("  = Device %s synced: offset=%+lld us  rtt=%lld us  samples=%d  sigma=%.1f us\n",
-                           Clients[I].Ip,
-                           (long long)Info->OffsetUs,
-                           (long long)Info->RttUs,
-                           Info->SampleCount,
-                           Info->SigmaUs);
-                    break;
-                }
+                if (Clients[I].Addr.sin_addr.s_addr == From.sin_addr.s_addr) { Idx = I; break; }
+            }
+            if (Idx == -1 && ClientCount < MaxClients) {
+                Idx = ClientCount;
+                Clients[Idx].Addr = Ca;
+                inet_ntop(AF_INET, &Ca.sin_addr, Clients[Idx].Ip, 32);
+                printf("  + Device: %s  (total: %d)\n", Clients[Idx].Ip, ClientCount + 1);
+                ClientCount++;
+            }
+            if (Idx != -1) {
+                Clients[Idx].HasSyncInfo  = 1;
+                Clients[Idx].LastOffsetUs = Info->OffsetUs;
+                Clients[Idx].LastRttUs    = Info->RttUs;
+                printf("  = Device %s synced: offset=%+lld us  rtt=%lld us  samples=%d  sigma=%.1f us\n",
+                       Clients[Idx].Ip,
+                       (long long)Info->OffsetUs,
+                       (long long)Info->RttUs,
+                       Info->SampleCount,
+                       Info->SigmaUs);
             }
             LeaveCriticalSection(&ClientLock);
         }
