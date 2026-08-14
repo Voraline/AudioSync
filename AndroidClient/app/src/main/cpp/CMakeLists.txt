@@ -6,8 +6,8 @@ add_library(audiosync SHARED native-lib.c)
 target_compile_options(audiosync PRIVATE
     -std=c11
     -O3
-    -march=armv8.2-a+simd
-    -flto=thin
+    -march=armv8-a+simd
+    -flto=full
     -funroll-loops
     -fomit-frame-pointer
     -fno-plt
@@ -28,7 +28,7 @@ target_compile_options(audiosync PRIVATE
 )
 
 target_link_options(audiosync PRIVATE
-    -flto=thin
+    -flto=full
     -Wl,--gc-sections
     -Wl,-O3
     -Wl,--as-needed
