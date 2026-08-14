@@ -7,7 +7,6 @@ target_compile_options(audiosync PRIVATE
     -std=c11
     -O3
     -march=armv8.2-a+simd
-    -mtune=cortex-a76
     -flto=thin
     -funroll-loops
     -fomit-frame-pointer
