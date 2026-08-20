@@ -29,7 +29,7 @@
 
 #define ServerPort     11000
 #define ClientPort     11001
-#define MaxSyncSamples 4000
+#define MaxSyncSamples 6000
 
 #define PtRegister 0x01
 #define PtSyncReq  0x02
