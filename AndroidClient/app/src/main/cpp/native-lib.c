@@ -656,6 +656,12 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AudioStream = NULL;
 }
 
+JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStop(JNIEnv* Env, jobject Obj) {
+    (void)Env; (void)Obj;
+    atomic_store_explicit(&FireReady, 0, memory_order_release);
+    Logi("Stopped");
+}
+
 JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeDisconnect(JNIEnv* Env, jobject Obj) {
     (void)Env; (void)Obj;
     atomic_store_explicit(&Running,   0, memory_order_release);
