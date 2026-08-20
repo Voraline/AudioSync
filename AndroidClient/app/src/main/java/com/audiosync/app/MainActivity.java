@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.provider.Settings;
 import android.media.AudioManager;
 import android.text.InputType;
 import android.view.Gravity;
@@ -49,6 +50,7 @@ public class MainActivity extends Activity {
         MulticastLock.setReferenceCounted(false);
         PowerManager Pm = (PowerManager) getSystemService(POWER_SERVICE);
         WakeLock = Pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AudioSync:Wake");
+        RequestIgnoreBatteryOptimizations(Pm);
         LinearLayout Root = new LinearLayout(this);
         Root.setOrientation(LinearLayout.VERTICAL);
         Root.setGravity(Gravity.CENTER);
@@ -185,6 +187,14 @@ public class MainActivity extends Activity {
         NativeDisconnect();
         ReleaseLocks();
     }
+    private void RequestIgnoreBatteryOptimizations(PowerManager Pm) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) return;
+        String Pkg = getPackageName();
+        if (Pm.isIgnoringBatteryOptimizations(Pkg)) return;
+        Intent I = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+        I.setData(Uri.parse("package:" + Pkg));
+        startActivity(I);
+    }
     private void ReleaseLocks() {
         if (WifiLock.isHeld()) WifiLock.release();
         if (MulticastLock.isHeld()) MulticastLock.release();
@@ -202,7 +212,6 @@ public class MainActivity extends Activity {
     }
     private void SetStatus(String Msg) {
         if (StatusView != null) StatusView.setText(Msg);
-        AddConsoleLine("Status: " + Msg);
     }
     @Override protected void onDestroy() { StopEngine(); NativeClearConsoleSink(); super.onDestroy(); }
 }
