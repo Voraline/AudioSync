@@ -7,7 +7,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.provider.Settings;
 import android.media.AudioManager;
 import android.text.InputType;
 import android.view.Gravity;
@@ -23,16 +22,14 @@ public class MainActivity extends Activity {
     public native void NativeSetOutputTrimUs(double TrimUs);
     public native void NativeConnect(String Ip);
     public native void NativeStartReceiveLoop();
-    public native void NativeStop();
     public native void NativeDisconnect();
     private static final int PickRequest = 1;
     private static final int MaxConsoleChars = 12000;
     private Handler UiHandler;
     private TextView StatusView, ConsoleView;
-    private Button PickBtn, ConnectBtn, StopBtn, DisconnectBtn;
+    private Button PickBtn, ConnectBtn, DisconnectBtn;
     private EditText IpField, TrimUsField;
     private boolean AudioLoaded = false;
-    private boolean Connected = false;
     private WifiManager.WifiLock WifiLock;
     private WifiManager.MulticastLock MulticastLock;
     private PowerManager.WakeLock WakeLock;
@@ -50,7 +47,6 @@ public class MainActivity extends Activity {
         MulticastLock.setReferenceCounted(false);
         PowerManager Pm = (PowerManager) getSystemService(POWER_SERVICE);
         WakeLock = Pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AudioSync:Wake");
-        RequestIgnoreBatteryOptimizations(Pm);
         LinearLayout Root = new LinearLayout(this);
         Root.setOrientation(LinearLayout.VERTICAL);
         Root.setGravity(Gravity.CENTER);
@@ -70,8 +66,6 @@ public class MainActivity extends Activity {
         TrimUsField.setLayoutParams(WithMargin);
         ConnectBtn = new Button(this); ConnectBtn.setText("CONNECT & ARM");
         ConnectBtn.setLayoutParams(WithMargin); ConnectBtn.setEnabled(false);
-        StopBtn = new Button(this); StopBtn.setText("STOP");
-        StopBtn.setLayoutParams(WithMargin); StopBtn.setEnabled(false);
         DisconnectBtn = new Button(this); DisconnectBtn.setText("DISCONNECT");
         DisconnectBtn.setLayoutParams(WithMargin); DisconnectBtn.setEnabled(false);
         StatusView = new TextView(this); StatusView.setText("Pick an MP3 file to begin.");
@@ -85,12 +79,12 @@ public class MainActivity extends Activity {
         ConsoleScroll.setLayoutParams(ConsoleParams);
         ConsoleScroll.addView(ConsoleView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         Root.addView(Title); Root.addView(PickBtn); Root.addView(IpField); Root.addView(TrimUsField);
-        Root.addView(ConnectBtn); Root.addView(StopBtn); Root.addView(DisconnectBtn); Root.addView(StatusView); Root.addView(ConsoleScroll);
+        Root.addView(ConnectBtn); Root.addView(DisconnectBtn); Root.addView(StatusView); Root.addView(ConsoleScroll);
         ScrollView PageScroll = new ScrollView(this);
         PageScroll.addView(Root, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(PageScroll);
         PickBtn.setOnClickListener(V -> {
-            Intent I = new Intent(Intent.ACTION_GET_CONTENT); I.setType("audio/*");
+            Intent I = new Intent(Intent.ACTION_GET_CONTENT); I.setType("audio/mpeg");
             startActivityForResult(I, PickRequest);
         });
         ConnectBtn.setOnClickListener(V -> {
@@ -99,10 +93,6 @@ public class MainActivity extends Activity {
             Double TrimUs = ReadTrimUs();
             if (TrimUs == null) { SetStatus("Trim must be a number."); return; }
             StartEngine(Ip, TrimUs);
-        });
-        StopBtn.setOnClickListener(V -> {
-            NativeStop();
-            SetStatus("Stopped. Pick a new song, or wait for the next fire.");
         });
         DisconnectBtn.setOnClickListener(V -> StopEngine());
     }
@@ -127,8 +117,8 @@ public class MainActivity extends Activity {
                 String Info = Parts[1] + " ch  " + Parts[2] + " Hz  " + FormatDur(Float.parseFloat(Parts[3]));
                 AudioLoaded = true;
                 UiHandler.post(() -> {
-                    SetStatus(Connected ? "Ready: " + Info + "  (armed, waiting for fire)" : "Ready: " + Info);
-                    PickBtn.setEnabled(true); ConnectBtn.setEnabled(!Connected);
+                    SetStatus("Ready: " + Info);
+                    ConnectBtn.setEnabled(true); PickBtn.setEnabled(true);
                 });
             } catch (Exception E) {
                 UiHandler.post(() -> { SetStatus("Error: " + E.getMessage()); PickBtn.setEnabled(true); });
@@ -164,8 +154,7 @@ public class MainActivity extends Activity {
         }
         NativeSetOutputTrimUs(TrimUs);
         SetStatus("Syncing clock with " + Ip + "...");
-        ConnectBtn.setEnabled(false); StopBtn.setEnabled(true); DisconnectBtn.setEnabled(true); TrimUsField.setEnabled(false);
-        Connected = true;
+        PickBtn.setEnabled(false); ConnectBtn.setEnabled(false); DisconnectBtn.setEnabled(true); TrimUsField.setEnabled(false);
         if (!WifiLock.isHeld()) WifiLock.acquire();
         if (!MulticastLock.isHeld()) MulticastLock.acquire();
         if (!WakeLock.isHeld()) WakeLock.acquire();
@@ -175,25 +164,15 @@ public class MainActivity extends Activity {
             NativeStartReceiveLoop();
             NativeDisconnect();
             ReleaseLocks();
-            Connected = false;
             UiHandler.post(() -> {
                 SetStatus("Disconnected.");
-                PickBtn.setEnabled(true); ConnectBtn.setEnabled(AudioLoaded); StopBtn.setEnabled(false); DisconnectBtn.setEnabled(false); TrimUsField.setEnabled(true);
+                PickBtn.setEnabled(true); ConnectBtn.setEnabled(AudioLoaded); DisconnectBtn.setEnabled(false); TrimUsField.setEnabled(true);
             });
         }) {{ setDaemon(true); }}.start();
     }
     private void StopEngine() {
-        NativeStop();
         NativeDisconnect();
         ReleaseLocks();
-    }
-    private void RequestIgnoreBatteryOptimizations(PowerManager Pm) {
-        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) return;
-        String Pkg = getPackageName();
-        if (Pm.isIgnoringBatteryOptimizations(Pkg)) return;
-        Intent I = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-        I.setData(Uri.parse("package:" + Pkg));
-        startActivity(I);
     }
     private void ReleaseLocks() {
         if (WifiLock.isHeld()) WifiLock.release();
@@ -212,6 +191,7 @@ public class MainActivity extends Activity {
     }
     private void SetStatus(String Msg) {
         if (StatusView != null) StatusView.setText(Msg);
+        AddConsoleLine("Status: " + Msg);
     }
     @Override protected void onDestroy() { StopEngine(); NativeClearConsoleSink(); super.onDestroy(); }
 }
