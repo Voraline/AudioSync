@@ -19,13 +19,11 @@
 #include <linux/net_tstamp.h>
 #include <linux/errqueue.h>
 
-#define MINIMP3_IMPLEMENTATION
-#define MINIMP3_ONLY_MP3
-#include "minimp3.h"
+#define DR_MP3_IMPLEMENTATION
+#define DR_MP3_NO_STDIO
+#include "dr_mp3.h"
 
 #define Tag  "AudioSync"
-#define Logi(...) NativeLog(ANDROID_LOG_INFO, __VA_ARGS__)
-#define Loge(...) NativeLog(ANDROID_LOG_ERROR, __VA_ARGS__)
 
 #define ServerPort     11000
 #define ClientPort     11001
@@ -37,10 +35,30 @@
 #define PtFire     0x04
 #define PtSyncInfo 0x05
 
-typedef struct __attribute__((packed)) { uint8_t Type; uint64_t T1; }                           SyncReqPkt;
-typedef struct __attribute__((packed)) { uint8_t Type; uint64_t T1; uint64_t T2; uint64_t T3; } SyncAckPkt;
-typedef struct __attribute__((packed)) { uint8_t Type; uint64_t FireAtPcUs; }                   FirePkt;
-typedef struct __attribute__((packed)) { uint8_t Type; int64_t OffsetUs; int64_t RttUs; int32_t SampleCount; float SigmaUs; } SyncInfoPkt;
+typedef struct __attribute__((packed)) {
+    uint8_t Type;
+    uint64_t T1;
+} SyncReqPkt;
+
+typedef struct __attribute__((packed)) {
+    uint8_t Type;
+    uint64_t T1;
+    uint64_t T2;
+    uint64_t T3;
+} SyncAckPkt;
+
+typedef struct __attribute__((packed)) {
+    uint8_t Type;
+    uint64_t FireAtPcUs;
+} FirePkt;
+
+typedef struct __attribute__((packed)) {
+    uint8_t Type;
+    int64_t OffsetUs;
+    int64_t RttUs;
+    int32_t SampleCount;
+    float SigmaUs;
+} SyncInfoPkt;
 typedef struct { int64_t Rtt; int64_t Offset; } SyncSample;
 
 static float*   PcmBuf        = NULL;
@@ -112,19 +130,19 @@ static SyncSample ProbeRing[ProbeRingSize];
 static int        ProbeRingHead = 0;
 static int        ProbeRingFull = 0;
 
-static int CmpRtt(const void* A, const void* B) {
+static int CompareRoundTripTime(const void* A, const void* B) {
     int64_t Ra = ((const SyncSample*)A)->Rtt;
     int64_t Rb = ((const SyncSample*)B)->Rtt;
     return (Ra > Rb) - (Ra < Rb);
 }
 
-static uint64_t NowUs(void) {
+static uint64_t GetMonotonicMicroseconds(void) {
     struct timespec Ts;
     clock_gettime(CLOCK_MONOTONIC, &Ts);
     return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
 }
 
-static uint64_t NowRealUs(void) {
+static uint64_t GetRealtimeMicroseconds(void) {
     struct timespec Ts;
     clock_gettime(CLOCK_REALTIME, &Ts);
     return (uint64_t)Ts.tv_sec * 1000000ULL + (uint64_t)Ts.tv_nsec / 1000ULL;
@@ -133,12 +151,12 @@ static uint64_t NowRealUs(void) {
 static int64_t RealToMonoDeltaUs   = 0;
 static int     RealToMonoDeltaInit = 0;
 
-static void InitRealToMonoDelta(void) {
+static void InitializeRealtimeToMonotonicDelta(void) {
     if (RealToMonoDeltaInit) return;
     int64_t Deltas[8];
     for (int I = 0; I < 8; I++) {
-        uint64_t R = NowRealUs();
-        uint64_t M = NowUs();
+        uint64_t R = GetRealtimeMicroseconds();
+        uint64_t M = GetMonotonicMicroseconds();
         Deltas[I] = (int64_t)M - (int64_t)R;
     }
     for (int I = 1; I < 8; I++) {
@@ -148,26 +166,26 @@ static void InitRealToMonoDelta(void) {
     }
     RealToMonoDeltaUs   = Deltas[4];
     RealToMonoDeltaInit = 1;
-    Logi("RealToMonoDelta: %lld us", (long long)RealToMonoDeltaUs);
+    NativeLog(ANDROID_LOG_INFO, "RealToMonoDelta: %lld us", (long long)RealToMonoDeltaUs);
 }
 
-static uint64_t RealTsToMonoUs(const struct timespec* Ts) {
+static uint64_t RealtimeTimestampToMonotonicMicroseconds(const struct timespec* Ts) {
     uint64_t RealUs = (uint64_t)Ts->tv_sec * 1000000ULL
                     + (uint64_t)Ts->tv_nsec / 1000ULL;
     return (uint64_t)((int64_t)RealUs + RealToMonoDeltaUs);
 }
 
-static int EnableKernelRxTs(int Fd) {
+static int EnableKernelReceiveTimestamps(int Fd) {
     int Flags = SOF_TIMESTAMPING_RX_SOFTWARE
               | SOF_TIMESTAMPING_SOFTWARE
               | SOF_TIMESTAMPING_OPT_CMSG
               | SOF_TIMESTAMPING_OPT_TSONLY;
     int Ret = setsockopt(Fd, SOL_SOCKET, SO_TIMESTAMPING, &Flags, sizeof(Flags));
-    if (Ret < 0) Logi("SO_TIMESTAMPING unavailable - using userspace T4 fallback");
+    if (Ret < 0) NativeLog(ANDROID_LOG_INFO, "SO_TIMESTAMPING unavailable - using userspace T4 fallback");
     return (Ret == 0);
 }
 
-static ssize_t RecvWithTs(int Fd, void* Buf, size_t Len, uint64_t* T4Out) {
+static ssize_t ReceiveWithTimestamp(int Fd, void* Buf, size_t Len, uint64_t* T4Out) {
     struct iovec Iov = { .iov_base = Buf, .iov_len = Len };
     uint8_t CtrlBuf[CMSG_SPACE(sizeof(struct timespec) * 3)];
     struct msghdr Msg;
@@ -178,14 +196,14 @@ static ssize_t RecvWithTs(int Fd, void* Buf, size_t Len, uint64_t* T4Out) {
     Msg.msg_controllen = sizeof(CtrlBuf);
 
     ssize_t N  = recvmsg(Fd, &Msg, 0);
-    *T4Out     = NowUs();
+    *T4Out     = GetMonotonicMicroseconds();
 
     if (N > 0) {
         for (struct cmsghdr* Cm = CMSG_FIRSTHDR(&Msg); Cm; Cm = CMSG_NXTHDR(&Msg, Cm)) {
             if (Cm->cmsg_level == SOL_SOCKET && Cm->cmsg_type == SCM_TIMESTAMPING) {
                 struct timespec* Ts = (struct timespec*)CMSG_DATA(Cm);
                 if (Ts[0].tv_sec != 0 || Ts[0].tv_nsec != 0)
-                    *T4Out = RealTsToMonoUs(&Ts[0]);
+                    *T4Out = RealtimeTimestampToMonotonicMicroseconds(&Ts[0]);
                 break;
             }
         }
@@ -243,7 +261,7 @@ static aaudio_data_callback_result_t AudioCallback(AAudioStream* St, void* U, vo
         if (AheadFrames < 0) AheadFrames = 0;
         WritePresentsUs = HwPresentNs / 1000LL + AheadFrames * 1000000LL / StreamSampleRate;
     } else {
-        WritePresentsUs = (int64_t)NowUs();
+        WritePresentsUs = (int64_t)GetMonotonicMicroseconds();
     }
     double TargetOffsetUs = (double)atomic_load_explicit(&ClockOffsetUs, memory_order_relaxed);
     if (!SmoothedOffsetInit) { SmoothedOffsetUs = TargetOffsetUs; SmoothedOffsetInit = 1; }
@@ -264,7 +282,7 @@ static aaudio_data_callback_result_t AudioCallback(AAudioStream* St, void* U, vo
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-static void DoClockSync(void) {
+static void SynchronizeClock(void) {
     struct sched_param Sp;
     Sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &Sp);
@@ -281,9 +299,9 @@ static void DoClockSync(void) {
     setsockopt(SyncSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 200000};
     setsockopt(SyncSock, SOL_SOCKET, SO_RCVTIMEO,  &Tv,   sizeof(Tv));
-    InitRealToMonoDelta();
-    int SioTimestampingActive = EnableKernelRxTs(SyncSock);
-    Logi("ClockSync: RX timestamp mode = %s",
+    InitializeRealtimeToMonotonicDelta();
+    int SioTimestampingActive = EnableKernelReceiveTimestamps(SyncSock);
+    NativeLog(ANDROID_LOG_INFO, "ClockSync: RX timestamp mode = %s",
          SioTimestampingActive ? "kernel SO_TIMESTAMPING" : "userspace fallback");
 
     static SyncSample Samples[MaxSyncSamples];
@@ -294,11 +312,11 @@ static void DoClockSync(void) {
     for (int I = 0; I < MaxSyncSamples; I++) {
         SyncReqPkt Req;
         Req.Type    = PtSyncReq;
-        uint64_t T1 = NowUs();
+        uint64_t T1 = GetMonotonicMicroseconds();
         Req.T1      = T1;
         sendto(SyncSock, &Req, sizeof(Req), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
         uint64_t T4 = 0;
-        ssize_t  N  = RecvWithTs(SyncSock, RxBuf, sizeof(RxBuf), &T4);
+        ssize_t  N  = ReceiveWithTimestamp(SyncSock, RxBuf, sizeof(RxBuf), &T4);
         nanosleep(&Gap, NULL);
         if (N < (ssize_t)sizeof(SyncAckPkt)) continue;
         SyncAckPkt* Ack = (SyncAckPkt*)RxBuf;
@@ -311,7 +329,7 @@ static void DoClockSync(void) {
     close(SyncSock);
     if (SampleCount == 0) return;
 
-    qsort(Samples, (size_t)SampleCount, sizeof(SyncSample), CmpRtt);
+    qsort(Samples, (size_t)SampleCount, sizeof(SyncSample), CompareRoundTripTime);
 
     int64_t MinRtt = Samples[0].Rtt;
     int TopN = 0;
@@ -349,7 +367,7 @@ static void DoClockSync(void) {
     ProbeRingHead = 0;
     ProbeRingFull = 0;
 
-    Logi("ClockSync: collected=%d  rttFiltered=%d  final=%d  "
+    NativeLog(ANDROID_LOG_INFO, "ClockSync: collected=%d  rttFiltered=%d  final=%d  "
          "offset=%lld us  minRTT=%lld us  sigma=%.1f us  precision(SEM)=%.1f us",
          SampleCount, TopN, FinalCount,
          (long long)FinalOffset,
@@ -367,15 +385,15 @@ static void DoClockSync(void) {
     }
 }
 
-static void DoRollingProbe(int SSock) {
+static void UpdateRollingProbe(int SSock) {
     SyncReqPkt Req;
     Req.Type    = PtSyncReq;
-    uint64_t T1 = NowUs();
+    uint64_t T1 = GetMonotonicMicroseconds();
     Req.T1      = T1;
     sendto(SSock, &Req, sizeof(Req), 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
     uint8_t RxBuf[64];
     uint64_t T4 = 0;
-    ssize_t  N  = RecvWithTs(SSock, RxBuf, sizeof(RxBuf), &T4);
+    ssize_t  N  = ReceiveWithTimestamp(SSock, RxBuf, sizeof(RxBuf), &T4);
     if (N < (ssize_t)sizeof(SyncAckPkt)) return;
     SyncAckPkt* Ack = (SyncAckPkt*)RxBuf;
     if (Ack->Type != PtSyncAck || Ack->T1 != T1) return;
@@ -399,7 +417,7 @@ static void DoRollingProbe(int SSock) {
 
     SyncSample Tmp[ProbeRingSize];
     memcpy(Tmp, ProbeRing, (size_t)Count * sizeof(SyncSample));
-    qsort(Tmp, (size_t)Count, sizeof(SyncSample), CmpRtt);
+    qsort(Tmp, (size_t)Count, sizeof(SyncSample), CompareRoundTripTime);
 
     int BestN = Count * 8 / 100;
     if (BestN < 2) BestN = 2;
@@ -441,10 +459,10 @@ static void* KeepAliveThread(void* U) {
     setsockopt(SSock, SOL_SOCKET, SO_PRIORITY,  &Prio, sizeof(Prio));
     struct timeval Tv = {0, 25000};
     setsockopt(SSock, SOL_SOCKET, SO_RCVTIMEO, &Tv,  sizeof(Tv));
-    EnableKernelRxTs(SSock);
+    EnableKernelReceiveTimestamps(SSock);
     while (atomic_load_explicit(&Running, memory_order_relaxed)) {
         sendto(Sock, &Ping, 1, 0, (struct sockaddr*)&SrvAddr, sizeof(SrvAddr));
-        DoRollingProbe(SSock);
+        UpdateRollingProbe(SSock);
         struct timespec Ts = {0, 30000000};
         nanosleep(&Ts, NULL);
     }
@@ -456,48 +474,25 @@ JNIEXPORT jstring JNICALL Java_com_audiosync_app_MainActivity_NativeDecodeMp3(JN
     (void)Obj;
     jsize Len = (*Env)->GetArrayLength(Env, Mp3Data);
     jbyte* Raw = (*Env)->GetByteArrayElements(Env, Mp3Data, NULL);
-    mp3dec_t Dec;
-    mp3dec_frame_info_t Info;
-    mp3d_sample_t Smp[MINIMP3_MAX_SAMPLES_PER_FRAME];
-    mp3dec_init(&Dec);
-    size_t PcmCap = (size_t)Len * 4;
-    float* Pcm    = (float*)malloc(PcmCap * sizeof(float));
-    size_t PcmLen = 0;
-    const uint8_t* Ptr  = (const uint8_t*)Raw;
-    int Left = (int)Len;
-    int Channels = 0, SampleRate = 0;
-    while (Left > 0) {
-        int N = mp3dec_decode_frame(&Dec, Ptr, Left, Smp, &Info);
-        if (Info.frame_bytes == 0) break;
-        Ptr  += Info.frame_bytes;
-        Left -= Info.frame_bytes;
-        if (N == 0) continue;
-        if (Channels == 0) { Channels = Info.channels; SampleRate = Info.hz; }
-        size_t Add = (size_t)(N * Info.channels);
-        if (PcmLen + Add > PcmCap) {
-            PcmCap = (PcmLen + Add) * 2;
-            Pcm    = (float*)realloc(Pcm, PcmCap * sizeof(float));
-        }
-        for (size_t I = 0; I < Add; I++) {
-            Pcm[PcmLen + I] = Smp[I] / 32768.0f;
-        }
-        PcmLen += Add;
-    }
+    drmp3_config Config = {0};
+    drmp3_uint64 FrameCount = 0;
+    float* Pcm = Raw == NULL ? NULL : drmp3_open_memory_and_read_pcm_frames_f32(
+        Raw, (size_t)Len, &Config, &FrameCount, NULL);
     (*Env)->ReleaseByteArrayElements(Env, Mp3Data, Raw, JNI_ABORT);
-    if (Channels == 0) {
-        free(Pcm);
+    if (Pcm == NULL || Config.channels == 0 || Config.sampleRate == 0) {
+        drmp3_free(Pcm, NULL);
         return (*Env)->NewStringUTF(Env, "ERROR:No frames decoded");
     }
-    free(PcmBuf);
+    drmp3_free(PcmBuf, NULL);
     PcmBuf        = Pcm;
-    PcmFrames     = (int)(PcmLen / (size_t)Channels);
-    PcmChannels   = Channels;
-    PcmSampleRate = SampleRate;
+    PcmFrames     = (int)FrameCount;
+    PcmChannels   = (int)Config.channels;
+    PcmSampleRate = (int)Config.sampleRate;
     atomic_store(&FireReady, 0);
-    Logi("Decoded: %d frames  %d ch  %d hz", PcmFrames, PcmChannels, PcmSampleRate);
+    NativeLog(ANDROID_LOG_INFO, "Decoded: %d frames  %d ch  %d hz", PcmFrames, PcmChannels, PcmSampleRate);
     char Msg[64];
-    float Secs = (float)PcmFrames / SampleRate;
-    snprintf(Msg, sizeof(Msg), "OK:%d:%d:%.1f", Channels, SampleRate, Secs);
+    float Secs = (float)PcmFrames / PcmSampleRate;
+    snprintf(Msg, sizeof(Msg), "OK:%d:%d:%.1f", PcmChannels, PcmSampleRate, Secs);
     return (*Env)->NewStringUTF(Env, Msg);
 }
 
@@ -511,7 +506,7 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeSetConsoleSink(
     ConsoleLogMethod = Method;
     pthread_mutex_unlock(&ConsoleLock);
     (*Env)->DeleteLocalRef(Env, Cls);
-    Logi("Console attached");
+    NativeLog(ANDROID_LOG_INFO, "Console attached");
 }
 
 JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeClearConsoleSink(JNIEnv* Env, jobject Obj) {
@@ -550,7 +545,10 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeConnect(JNIEnv*
     BindAddr.sin_port        = htons(ClientPort);
     BindAddr.sin_addr.s_addr = INADDR_ANY;
     if (bind(Sock, (struct sockaddr*)&BindAddr, sizeof(BindAddr)) < 0) {
-        Loge("bind failed"); close(Sock); Sock = -1; return;
+        NativeLog(ANDROID_LOG_ERROR, "bind failed");
+        close(Sock);
+        Sock = -1;
+        return;
     }
     struct ip_mreq Mreq;
     Mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.100");
@@ -560,8 +558,8 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeConnect(JNIEnv*
     SrvAddr.sin_family = AF_INET;
     SrvAddr.sin_port   = htons(ServerPort);
     inet_pton(AF_INET, SrvIp, &SrvAddr.sin_addr);
-    Logi("Connecting to %s", SrvIp);
-    DoClockSync();
+    NativeLog(ANDROID_LOG_INFO, "Connecting to %s", SrvIp);
+    SynchronizeClock();
     atomic_store_explicit(&Running, 1, memory_order_release);
     pthread_t Rt;
     pthread_attr_t Ra;
@@ -574,7 +572,7 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeConnect(JNIEnv*
 JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoop(JNIEnv* Env, jobject Obj) {
     (void)Env; (void)Obj;
     if (PcmFrames == 0 || Sock == -1) return;
-    Logi("Opening audio stream");
+    NativeLog(ANDROID_LOG_INFO, "Opening audio stream");
     atomic_store_explicit(&LastFirePcUs, 0, memory_order_release);
     SmoothedOffsetInit = 0;
     AAudioStreamBuilder* Bld;
@@ -587,12 +585,12 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     aaudio_result_t ProbeResult = AAudioStreamBuilder_openStream(Bld, &Probe);
     int UsedExclusive = 1;
     if (ProbeResult != AAUDIO_OK) {
-        Logi("Exclusive stream unavailable (%d), falling back to shared mode", (int)ProbeResult);
+        NativeLog(ANDROID_LOG_INFO, "Exclusive stream unavailable (%d), falling back to shared mode", (int)ProbeResult);
         UsedExclusive = 0;
         AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
         ProbeResult = AAudioStreamBuilder_openStream(Bld, &Probe);
         if (ProbeResult != AAUDIO_OK) {
-            Loge("Failed to open probe audio stream (%d)", (int)ProbeResult);
+            NativeLog(ANDROID_LOG_ERROR, "Failed to open probe audio stream (%d)", (int)ProbeResult);
             AAudioStreamBuilder_delete(Bld);
             return;
         }
@@ -614,12 +612,12 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     AAudioStream* St;
     aaudio_result_t OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
     if (OpenResult != AAUDIO_OK && UsedExclusive) {
-        Logi("Exclusive stream open failed (%d), retrying shared", (int)OpenResult);
+        NativeLog(ANDROID_LOG_INFO, "Exclusive stream open failed (%d), retrying shared", (int)OpenResult);
         AAudioStreamBuilder_setSharingMode(Bld, AAUDIO_SHARING_MODE_SHARED);
         OpenResult = AAudioStreamBuilder_openStream(Bld, &St);
     }
     if (OpenResult != AAUDIO_OK) {
-        Loge("Failed to open audio stream (%d)", (int)OpenResult);
+        NativeLog(ANDROID_LOG_ERROR, "Failed to open audio stream (%d)", (int)OpenResult);
         AAudioStreamBuilder_delete(Bld);
         return;
     }
@@ -631,7 +629,7 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
     if (StreamSampleRate <= 0) StreamSampleRate = PcmSampleRate;
     AAudioStream_setBufferSizeInFrames(St, Burst * 2);
     AAudioStream_requestStart(St);
-    Logi("Audio ready: burst=%d stream=%dch %dhz source=%dch %dhz", Burst, StreamChannels, StreamSampleRate, PcmChannels, PcmSampleRate);
+    NativeLog(ANDROID_LOG_INFO, "Audio ready: burst=%d stream=%dch %dhz source=%dch %dhz", Burst, StreamChannels, StreamSampleRate, PcmChannels, PcmSampleRate);
     struct sched_param Sp;
     Sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &Sp);
@@ -649,7 +647,7 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeStartReceiveLoo
         if (Fp->FireAtPcUs == atomic_load_explicit(&LastFirePcUs, memory_order_relaxed)) continue;
         atomic_store_explicit(&LastFirePcUs, Fp->FireAtPcUs, memory_order_release);
         atomic_store_explicit(&FireReady, 1, memory_order_release);
-        Logi("Fire Received! Target PC Time: %lld us", (long long)Fp->FireAtPcUs);
+        NativeLog(ANDROID_LOG_INFO, "Fire received: target PC time: %lld us", (long long)Fp->FireAtPcUs);
     }
     AAudioStream_requestStop(St);
     AAudioStream_close(St);
@@ -661,5 +659,5 @@ JNIEXPORT void JNICALL Java_com_audiosync_app_MainActivity_NativeDisconnect(JNIE
     atomic_store_explicit(&Running,   0, memory_order_release);
     atomic_store_explicit(&FireReady, 0, memory_order_release);
     if (Sock != -1) { shutdown(Sock, SHUT_RDWR); close(Sock); Sock = -1; }
-    Logi("Disconnected");
+    NativeLog(ANDROID_LOG_INFO, "Disconnected");
 }

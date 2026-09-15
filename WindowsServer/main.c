@@ -35,10 +35,30 @@ typedef struct _TIMESTAMPING_CONFIG {
 #define PtSyncInfo 0x05
 
 #pragma pack(push,1)
-typedef struct { uint8_t Type; uint64_t T1; } SyncReqPkt;
-typedef struct { uint8_t Type; uint64_t T1; uint64_t T2; uint64_t T3; } SyncAckPkt;
-typedef struct { uint8_t Type; uint64_t FireAtPcUs; } FirePkt;
-typedef struct { uint8_t Type; int64_t OffsetUs; int64_t RttUs; int32_t SampleCount; float SigmaUs; } SyncInfoPkt;
+typedef struct {
+    uint8_t Type;
+    uint64_t T1;
+} SyncReqPkt;
+
+typedef struct {
+    uint8_t Type;
+    uint64_t T1;
+    uint64_t T2;
+    uint64_t T3;
+} SyncAckPkt;
+
+typedef struct {
+    uint8_t Type;
+    uint64_t FireAtPcUs;
+} FirePkt;
+
+typedef struct {
+    uint8_t Type;
+    int64_t OffsetUs;
+    int64_t RttUs;
+    int32_t SampleCount;
+    float SigmaUs;
+} SyncInfoPkt;
 #pragma pack(pop)
 
 typedef struct {
@@ -84,7 +104,7 @@ static void EvaluateDelayMismatches(void) {
     }
 }
 
-static uint64_t NowUs(void) {
+static uint64_t GetMonotonicMicroseconds(void) {
     static LARGE_INTEGER F;
     static int Init = 0;
     if (!Init) { QueryPerformanceFrequency(&F); Init = 1; }
@@ -99,14 +119,14 @@ static int             PlainSoTimestamp = 0;
 static int64_t         FileTimeToQpcUsDelta = 0;
 static int             FileTimeToQpcInit = 0;
 
-static void InitFileTimeToQpcDelta(void) {
+static void InitializeFileTimeToQpcDelta(void) {
     if (FileTimeToQpcInit) return;
     int64_t Deltas[8];
     for (int I = 0; I < 8; I++) {
         FILETIME Ft;
         GetSystemTimePreciseAsFileTime(&Ft);
         uint64_t FtUs = ((uint64_t)Ft.dwHighDateTime << 32 | Ft.dwLowDateTime) / 10ULL;
-        uint64_t QpcUs = NowUs();
+        uint64_t QpcUs = GetMonotonicMicroseconds();
         Deltas[I] = (int64_t)QpcUs - (int64_t)FtUs;
     }
     for (int I = 1; I < 8; I++) {
@@ -118,7 +138,7 @@ static void InitFileTimeToQpcDelta(void) {
     FileTimeToQpcInit    = 1;
 }
 
-static int EnableKernelRxTs(SOCKET S) {
+static int EnableKernelReceiveTimestamps(SOCKET S) {
     GUID Guid = WSAID_WSARECVMSG;
     DWORD Bytes = 0;
     if (WSAIoctl(S, SIO_GET_EXTENSION_FUNCTION_POINTER,
@@ -142,7 +162,7 @@ static int EnableKernelRxTs(SOCKET S) {
     BOOL TsOn = TRUE;
     if (setsockopt(S, SOL_SOCKET, SO_TIMESTAMP, (char*)&TsOn, sizeof(TsOn)) == 0) {
         PlainSoTimestamp = 1;
-        InitFileTimeToQpcDelta();
+        InitializeFileTimeToQpcDelta();
         return 1;
     }
     printf("  [TS] SO_TIMESTAMP also unsupported, WSAGetLastError=%d\n", WSAGetLastError());
@@ -150,7 +170,7 @@ static int EnableKernelRxTs(SOCKET S) {
     return 0;
 }
 
-static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, uint64_t* TsOut) {
+static int ReceiveWithTimestamp(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, uint64_t* TsOut) {
     if (WSARecvMsgPtr != NULL && (SioTimestamping || PlainSoTimestamp)) {
         WSABUF Wb;
         Wb.buf = Buf;
@@ -167,7 +187,7 @@ static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, ui
 
         DWORD N = 0;
         int Rc = WSARecvMsgPtr(S, &Msg, &N, NULL, NULL);
-        uint64_t FallbackNow = NowUs();
+        uint64_t FallbackNow = GetMonotonicMicroseconds();
         if (Rc != 0) return -1;
 
         for (WSACMSGHDR* Cm = WSA_CMSG_FIRSTHDR(&Msg); Cm; Cm = WSA_CMSG_NXTHDR(&Msg, Cm)) {
@@ -196,7 +216,7 @@ static int RecvWithTs(SOCKET S, char* Buf, int Len, struct sockaddr_in* From, ui
 
     int Fl = sizeof(*From);
     int N = recvfrom(S, Buf, Len, 0, (struct sockaddr*)From, &Fl);
-    *TsOut = NowUs();
+    *TsOut = GetMonotonicMicroseconds();
     return N;
 }
 
@@ -211,12 +231,12 @@ static DWORD WINAPI ListenerThread(void* Unused) {
         }
         if (Pinned) SetThreadAffinityMask(GetCurrentThread(), Pinned);
     }
-    EnableKernelRxTs(Sock);
+    EnableKernelReceiveTimestamps(Sock);
     uint8_t Buf[64];
     struct sockaddr_in From;
     while (1) {
         uint64_t T2 = 0;
-        int N = RecvWithTs(Sock, (char*)Buf, sizeof(Buf), &From, &T2);
+        int N = ReceiveWithTimestamp(Sock, (char*)Buf, sizeof(Buf), &From, &T2);
         if (N < 1) continue;
         if (Buf[0] == PtRegister) {
             struct sockaddr_in Ca = From;
@@ -239,7 +259,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
             Ack.Type = PtSyncAck;
             Ack.T1   = Req->T1;
             Ack.T2   = T2;
-            Ack.T3   = NowUs();
+            Ack.T3   = GetMonotonicMicroseconds();
             sendto(Sock, (char*)&Ack, sizeof(Ack), 0, (struct sockaddr*)&From, sizeof(From));
         } else if (Buf[0] == PtSyncInfo && N >= (int)sizeof(SyncInfoPkt)) {
             SyncInfoPkt* Info = (SyncInfoPkt*)Buf;
@@ -297,7 +317,7 @@ int main(void) {
     Sleep(50);
     printf("RX timestamp mode = %s\n",
            SioTimestamping ? "kernel SIO_TIMESTAMPING" :
-           PlainSoTimestamp ? "SO_TIMESTAMP fallback" : "userspace NowUs() fallback");
+           PlainSoTimestamp ? "SO_TIMESTAMP fallback" : "userspace timestamp fallback");
     printf("AudioSync Server\n");
     printf("Listening on port %d. Press ENTER to fire all devices.\n\n", ServerPort);
     while (1) {
@@ -326,7 +346,7 @@ int main(void) {
         }
         FirePkt Fp;
         Fp.Type       = PtFire;
-        Fp.FireAtPcUs = NowUs() + 500000ULL;
+        Fp.FireAtPcUs = GetMonotonicMicroseconds() + 500000ULL;
         struct sockaddr_in McAddr;
         memset(&McAddr, 0, sizeof(McAddr));
         McAddr.sin_family      = AF_INET;
