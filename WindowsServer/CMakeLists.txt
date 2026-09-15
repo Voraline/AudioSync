@@ -7,22 +7,4 @@ add_executable(AudioSyncServer main.c)
 
 target_compile_definitions(AudioSyncServer PRIVATE NDEBUG)
 
-target_compile_options(AudioSyncServer PRIVATE
-    $<$<CONFIG:Release>:/O2>
-    $<$<CONFIG:Release>:/GL>
-    $<$<CONFIG:Release>:/Gy>
-    $<$<CONFIG:Release>:/fp:precise>
-    $<$<CONFIG:Release>:/fp:contract>
-    $<$<CONFIG:Release>:/arch:AVX2>
-    $<$<CONFIG:Release>:/Oi>
-    $<$<CONFIG:Release>:/Ot>
-    /W4
-)
-
-target_link_options(AudioSyncServer PRIVATE
-    $<$<CONFIG:Release>:/LTCG>
-    $<$<CONFIG:Release>:/OPT:REF>
-    $<$<CONFIG:Release>:/OPT:ICF>
-)
-
 target_link_libraries(AudioSyncServer PRIVATE ws2_32 winmm)
