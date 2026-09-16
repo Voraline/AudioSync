@@ -58,16 +58,21 @@ typedef struct {
     int64_t RttUs;
     int32_t SampleCount;
     float SigmaUs;
+    float SkewPpm;
+    float HwRateHz;
 } SyncInfoPkt;
 #pragma pack(pop)
 
 typedef struct {
     struct sockaddr_in Addr;
     char    Ip[32];
-    int     HasSyncInfo;
-    int64_t LastOffsetUs;
-    int64_t LastRttUs;
-    float   LastSigmaUs;
+    int      HasSyncInfo;
+    int64_t  LastOffsetUs;
+    int64_t  LastRttUs;
+    float    LastSigmaUs;
+    float    LastSkewPpm;
+    float    LastHwRateHz;
+    uint64_t LastReportUs;
 } Client;
 
 static SOCKET Sock;
@@ -76,17 +81,23 @@ static int ClientCount = 0;
 static CRITICAL_SECTION ClientLock;
 
 static void PrintCancellationForPair(int IndexA, int IndexB) {
-    float SigmaA = Clients[IndexA].LastSigmaUs;
-    float SigmaB = Clients[IndexB].LastSigmaUs;
-    double DeltaUs = sqrt((double)SigmaA * (double)SigmaA + (double)SigmaB * (double)SigmaB);
+    double SigmaA = (double)Clients[IndexA].LastSigmaUs;
+    double SigmaB = (double)Clients[IndexB].LastSigmaUs;
+    double DeltaUs = sqrt(SigmaA * SigmaA + SigmaB * SigmaB);
+    double SkewDiff = fabs((double)Clients[IndexA].LastSkewPpm - (double)Clients[IndexB].LastSkewPpm);
+    double RateA = (double)Clients[IndexA].LastHwRateHz;
+    double RateB = (double)Clients[IndexB].LastHwRateHz;
+    double RateDiffPpm = 0.0;
+    if (RateA > 1.0 && RateB > 1.0) RateDiffPpm = fabs(RateA - RateB) / RateB * 1e6;
     if (DeltaUs <= 0.0) {
         printf("      Device %d vs Device %d: mismatch=0.0 us (no cancellation)\n", IndexA + 1, IndexB + 1);
         return;
     }
     double DeltaSec = DeltaUs / 1000000.0;
     double CancelHz = 1.0 / (2.0 * DeltaSec);
-    printf("      Device %d vs Device %d: est. mismatch=%.1f us -> first cancel at %.1f Hz\n",
-           IndexA + 1, IndexB + 1, DeltaUs, CancelHz);
+    printf("      Device %d vs Device %d: est. mismatch=%.2f us -> first cancel at %.0f Hz  "
+           "(clock skew diff=%.2f ppm, dac rate diff=%.2f ppm)\n",
+           IndexA + 1, IndexB + 1, DeltaUs, CancelHz, SkewDiff, RateDiffPpm);
 }
 
 static void EvaluateDelayMismatches(void) {
@@ -104,38 +115,134 @@ static void EvaluateDelayMismatches(void) {
     }
 }
 
-static uint64_t GetMonotonicMicroseconds(void) {
+static int64_t QpcFrequency(void) {
     static LARGE_INTEGER F;
     static int Init = 0;
     if (!Init) { QueryPerformanceFrequency(&F); Init = 1; }
+    return F.QuadPart;
+}
+
+static uint64_t QpcTicksToMicroseconds(int64_t Ticks) {
+    int64_t Freq = QpcFrequency();
+    if (Freq <= 0) return 0;
+    int64_t Secs = Ticks / Freq;
+    int64_t Rem  = Ticks % Freq;
+    return (uint64_t)(Secs * 1000000LL + (Rem * 1000000LL) / Freq);
+}
+
+static uint64_t GetMonotonicMicroseconds(void) {
     LARGE_INTEGER T;
     QueryPerformanceCounter(&T);
-    return (uint64_t)(T.QuadPart * 1000000LL / F.QuadPart);
+    return QpcTicksToMicroseconds(T.QuadPart);
+}
+
+static double GetMonotonicMicrosecondsExact(void) {
+    LARGE_INTEGER T;
+    QueryPerformanceCounter(&T);
+    int64_t Freq = QpcFrequency();
+    if (Freq <= 0) return 0.0;
+    int64_t Secs = T.QuadPart / Freq;
+    int64_t Rem  = T.QuadPart % Freq;
+    return (double)Secs * 1000000.0 + ((double)Rem * 1000000.0) / (double)Freq;
 }
 
 static LPFN_WSARECVMSG WSARecvMsgPtr   = NULL;
 static int             SioTimestamping = 0;
 static int             PlainSoTimestamp = 0;
-static int64_t         FileTimeToQpcUsDelta = 0;
-static int             FileTimeToQpcInit = 0;
+
+#define DeltaRingSize 96
+#define MaxSkew 0.0004
+
+typedef struct { double QpcUs; double DeltaUs; } DeltaSample;
+
+static DeltaSample DeltaRing[DeltaRingSize];
+static int         DeltaHead = 0;
+static int         DeltaCount = 0;
+static double      DeltaAnchorUs = 0.0;
+static double      DeltaBaseUs = 0.0;
+static double      DeltaSkew = 0.0;
+static int         DeltaReady = 0;
+static double      DeltaNextSampleUs = 0.0;
+
+static double GetFileTimeMicroseconds(void) {
+    FILETIME Ft;
+    GetSystemTimePreciseAsFileTime(&Ft);
+    uint64_t Raw = ((uint64_t)Ft.dwHighDateTime << 32) | (uint64_t)Ft.dwLowDateTime;
+    return (double)Raw / 10.0;
+}
+
+static void RefitFileTimeToQpcDelta(void) {
+    if (DeltaCount < 1) return;
+    if (DeltaCount < 2) {
+        DeltaAnchorUs = DeltaRing[0].QpcUs;
+        DeltaBaseUs   = DeltaRing[0].DeltaUs;
+        DeltaSkew     = 0.0;
+        DeltaReady    = 1;
+        return;
+    }
+    double MinX = DeltaRing[0].QpcUs, MaxX = DeltaRing[0].QpcUs, Anchor = 0.0;
+    for (int I = 0; I < DeltaCount; I++) {
+        double X = DeltaRing[I].QpcUs;
+        if (X < MinX) MinX = X;
+        if (X > MaxX) MaxX = X;
+        Anchor += X;
+    }
+    Anchor /= (double)DeltaCount;
+    double Sx = 0.0, Sy = 0.0, Sxx = 0.0, Sxy = 0.0;
+    for (int I = 0; I < DeltaCount; I++) {
+        double X = DeltaRing[I].QpcUs - Anchor;
+        double Y = DeltaRing[I].DeltaUs;
+        Sx += X; Sy += Y; Sxx += X * X; Sxy += X * Y;
+    }
+    double N = (double)DeltaCount;
+    double Den = N * Sxx - Sx * Sx;
+    double B = 0.0;
+    if ((MaxX - MinX) > 3000000.0 && Den > 0.0) {
+        B = (N * Sxy - Sx * Sy) / Den;
+        if (B >  MaxSkew) B =  MaxSkew;
+        if (B < -MaxSkew) B = -MaxSkew;
+    }
+    DeltaAnchorUs = Anchor;
+    DeltaBaseUs   = (Sy - B * Sx) / N;
+    DeltaSkew     = B;
+    DeltaReady    = 1;
+}
+
+static void SampleFileTimeToQpcDelta(void) {
+    double BestUncert = 1e18, BestDelta = 0.0, BestQpc = 0.0;
+    for (int I = 0; I < 24; I++) {
+        double Q1 = GetMonotonicMicrosecondsExact();
+        double Ft = GetFileTimeMicroseconds();
+        double Q2 = GetMonotonicMicrosecondsExact();
+        double Uncert = (Q2 - Q1) * 0.5;
+        if (Uncert < 0.0 || Uncert > 1e6) continue;
+        if (Uncert < BestUncert) {
+            BestUncert = Uncert;
+            BestQpc    = (Q1 + Q2) * 0.5;
+            BestDelta  = BestQpc - Ft;
+        }
+    }
+    if (BestUncert > 1e17) return;
+    DeltaRing[DeltaHead].QpcUs   = BestQpc;
+    DeltaRing[DeltaHead].DeltaUs = BestDelta;
+    DeltaHead = (DeltaHead + 1) % DeltaRingSize;
+    if (DeltaCount < DeltaRingSize) DeltaCount++;
+    RefitFileTimeToQpcDelta();
+    DeltaNextSampleUs = BestQpc + 500000.0;
+}
 
 static void InitializeFileTimeToQpcDelta(void) {
-    if (FileTimeToQpcInit) return;
-    int64_t Deltas[8];
-    for (int I = 0; I < 8; I++) {
-        FILETIME Ft;
-        GetSystemTimePreciseAsFileTime(&Ft);
-        uint64_t FtUs = ((uint64_t)Ft.dwHighDateTime << 32 | Ft.dwLowDateTime) / 10ULL;
-        uint64_t QpcUs = GetMonotonicMicroseconds();
-        Deltas[I] = (int64_t)QpcUs - (int64_t)FtUs;
+    if (DeltaReady) return;
+    for (int I = 0; I < 6; I++) {
+        SampleFileTimeToQpcDelta();
+        Sleep(2);
     }
-    for (int I = 1; I < 8; I++) {
-        int64_t K = Deltas[I]; int J = I - 1;
-        while (J >= 0 && Deltas[J] > K) { Deltas[J+1] = Deltas[J]; J--; }
-        Deltas[J+1] = K;
-    }
-    FileTimeToQpcUsDelta = Deltas[4];
-    FileTimeToQpcInit    = 1;
+}
+
+static double EvaluateFileTimeToQpcDelta(double AtQpcUs) {
+    if (!DeltaReady) return 0.0;
+    if (AtQpcUs > DeltaNextSampleUs) SampleFileTimeToQpcDelta();
+    return DeltaBaseUs + DeltaSkew * (AtQpcUs - DeltaAnchorUs);
 }
 
 static int EnableKernelReceiveTimestamps(SOCKET S) {
@@ -187,7 +294,7 @@ static int ReceiveWithTimestamp(SOCKET S, char* Buf, int Len, struct sockaddr_in
 
         DWORD N = 0;
         int Rc = WSARecvMsgPtr(S, &Msg, &N, NULL, NULL);
-        uint64_t FallbackNow = GetMonotonicMicroseconds();
+        double FallbackNow = GetMonotonicMicrosecondsExact();
         if (Rc != 0) return -1;
 
         for (WSACMSGHDR* Cm = WSA_CMSG_FIRSTHDR(&Msg); Cm; Cm = WSA_CMSG_NXTHDR(&Msg, Cm)) {
@@ -195,22 +302,22 @@ static int ReceiveWithTimestamp(SOCKET S, char* Buf, int Len, struct sockaddr_in
                 ULONGLONG Raw = *(ULONGLONG*)WSA_CMSG_DATA(Cm);
                 if (Raw > 0) {
                     if (SioTimestamping) {
-                        static LARGE_INTEGER F;
-                        static int FInit = 0;
-                        if (!FInit) { QueryPerformanceFrequency(&F); FInit = 1; }
-                        uint64_t Us = Raw * 1000000ULL / (uint64_t)F.QuadPart;
-                        *TsOut = Us;
+                        *TsOut = QpcTicksToMicroseconds((int64_t)Raw);
                         return (int)N;
                     } else {
-                        uint64_t FtUs = Raw / 10ULL;
-                        *TsOut = (uint64_t)((int64_t)FtUs + FileTimeToQpcUsDelta);
+                        double FtUs = (double)Raw / 10.0;
+                        double Stamped = FtUs + EvaluateFileTimeToQpcDelta(FallbackNow);
+                        if (Stamped <= FallbackNow + 1000.0 && Stamped > FallbackNow - 2000000.0)
+                            *TsOut = (uint64_t)Stamped;
+                        else
+                            *TsOut = (uint64_t)FallbackNow;
                         return (int)N;
                     }
                 }
                 break;
             }
         }
-        *TsOut = FallbackNow;
+        *TsOut = (uint64_t)FallbackNow;
         return (int)N;
     }
 
@@ -232,6 +339,7 @@ static DWORD WINAPI ListenerThread(void* Unused) {
         if (Pinned) SetThreadAffinityMask(GetCurrentThread(), Pinned);
     }
     EnableKernelReceiveTimestamps(Sock);
+    InitializeFileTimeToQpcDelta();
     uint8_t Buf[64];
     struct sockaddr_in From;
     while (1) {
@@ -278,17 +386,27 @@ static DWORD WINAPI ListenerThread(void* Unused) {
                 ClientCount++;
             }
             if (Idx != -1) {
+                int WasSynced = Clients[Idx].HasSyncInfo;
+                uint64_t NowUs = GetMonotonicMicroseconds();
                 Clients[Idx].HasSyncInfo  = 1;
                 Clients[Idx].LastOffsetUs = Info->OffsetUs;
                 Clients[Idx].LastRttUs    = Info->RttUs;
                 Clients[Idx].LastSigmaUs  = Info->SigmaUs;
-                printf("  = Device %s synced: offset=%+lld us  minRTT=%lld us  samples=%d  precision=%.1f us\n",
-                       Clients[Idx].Ip,
-                       (long long)Info->OffsetUs,
-                       (long long)Info->RttUs,
-                       Info->SampleCount,
-                       Info->SigmaUs);
-                EvaluateDelayMismatches();
+                Clients[Idx].LastSkewPpm  = Info->SkewPpm;
+                Clients[Idx].LastHwRateHz = Info->HwRateHz;
+                if (!WasSynced || NowUs - Clients[Idx].LastReportUs > 4000000ULL) {
+                    Clients[Idx].LastReportUs = NowUs;
+                    printf("  = Device %s: offset=%+lld us  minRTT=%lld us  samples=%d  "
+                           "precision=%.2f us  skew=%+.2f ppm  dac=%.2f Hz\n",
+                           Clients[Idx].Ip,
+                           (long long)Info->OffsetUs,
+                           (long long)Info->RttUs,
+                           Info->SampleCount,
+                           Info->SigmaUs,
+                           Info->SkewPpm,
+                           Info->HwRateHz);
+                    EvaluateDelayMismatches();
+                }
             }
             LeaveCriticalSection(&ClientLock);
         }
@@ -336,10 +454,12 @@ int main(void) {
         printf("\n  Device clock offsets:\n");
         for (int I = 0; I < LocalCount; I++) {
             if (LocalClients[I].HasSyncInfo) {
-                printf("    Device %d (%s): offset=%+lld us  rtt=%lld us\n",
+                printf("    Device %d (%s): offset=%+lld us  rtt=%lld us  precision=%.2f us  skew=%+.2f ppm\n",
                        I + 1, LocalClients[I].Ip,
                        (long long)LocalClients[I].LastOffsetUs,
-                       (long long)LocalClients[I].LastRttUs);
+                       (long long)LocalClients[I].LastRttUs,
+                       LocalClients[I].LastSigmaUs,
+                       LocalClients[I].LastSkewPpm);
             } else {
                 printf("    Device %d (%s): not synced yet\n", I + 1, LocalClients[I].Ip);
             }
